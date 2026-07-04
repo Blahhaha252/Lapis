@@ -50,21 +50,43 @@ class Reader:
                 sampled_w = item.get("Sampled_Width")
                 stored_h = item.get("Stored_Height")
                 stored_w = item.get("Stored_Width")
-                if not format_string and not plain_format and if not args.input_video_codec:
-                    raise ValueError("format_string and plain_format was not found. Please pass it in")
+                
+                # logic for video codec information
                 if args.input_video_codec:
                     if (format_string or plain_format) and not args.suppress_warning:
-                        print(
-                            "[WARNING] Video codec was provided even though the media "
-                            "already exposes it. Using the provided value."
-                        )
+                        print("[WARNING] Video codec was provided even though the media already exposes it. Using the provided value.")
                     self.video_codec = args.input_video_codec
-                if format_string:
+                elif format_string:
                     self.video_codec = format_string
                 elif plain_format:
                     self.video_codec = plain_format
-                if not stored_w and width and sampled_w:
-                    raise ValueError("Width could not be determined. Please pass it in")
-                if not stored_h and height and sampled_h:
-                    raise ValueError("Height could not be determined. Please pass it in")
-                if args.
+                else:
+                    raise ValueError("[ERROR] format_string and plain_format was not found. Please pass it in")
+                # logic for width and height
+                
+                if args.width:
+                    if (stored_w or width or sampled_w) and not args.supress_warning:
+                        print("[WARNING] Video width was provided even though the media already exposes it. Using the provided value.")
+                    self.video_width = int(args.width)
+                elif stored_w:
+                    self.video_width = int(stored_w)
+                elif sampled_w:
+                    self.video_width = int(sampled_w)
+                elif width:
+                    self.video_width = int(width)
+                else:
+                    raise ValueError("[ERROR] width, stored width, and sampled width was not found. Please pass it in")
+                
+                if args.height:
+                    if (stored_h or height or sampled_h) and not args.supress_warning:
+                         print("[WARNING] Video  was provided even though the media already exposes it. Using the provided value.")
+                    self.video_height = int(args.height)
+                elif stored_h:
+                    self.video_height = int(stored_h)
+                elif sampled_h:
+                    self.video_height = int(sampled_h)
+                elif height:
+                    self.video_height = int(height)
+                else:
+                    raise ValueError("[ERROR] height, stored height, and sampled height was not found. Please pass it in")
+                
