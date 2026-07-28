@@ -1,0 +1,4 @@
+git add .		-	stage changes
+git commit -m "title"	-	commit to thingy
+git push		-	push to place
+git status

@@ -24,17 +24,40 @@ class Encoder:
     def barf(self):
         pass
 class Reader:
-    def __init__(self, media_path):
+    def __init__(self, media_path, exist, is_file):
+        # stuff accessable by the main script for logical work
+        self.exists = exists
+        self.is_file = is_file
         self.media = media_path
-        if not os.path.exists(self.media):
-            raise FileNotFoundError(f"File not found: {self.media}")
         self.video_codec = None
         self.video_bitrate = None
         self.video_bitrate_target = None
         self.video_bitrate_mode =  None
         self.video_width = None
         self.video_height = None
+        self.fps_num = None
+        self.fps_den = None
+        self.fps = None
+        self.common_fps = [
+            (23.976023976, (24000, 1001)),
+            (24.0,          (24, 1)),
+            (25.0,          (25, 1)),
+            (29.97002997,   (30000, 1001)),
+            (30.0,          (30, 1)),
+            (47.952047952,  (48000, 1001)),
+            (48.0,          (48, 1)),
+            (50.0,          (50, 1)),
+            (59.94005994,   (60000, 1001)),
+            (60.0,          (60, 1)),
+            (119.88011988,  (120000, 1001)),
+            (120.0,         (120, 1)),
+        ]
     def read(self, args):
+        # filtering paths and such
+        if not self.exists:
+            raise ValueError("[ERROR] Media does not appear to exist")
+        if not self.is_file:
+            raise ValueError("[ERROR] Currently not supporting a folder of contents")
         cmd = ["./mi/mediainfo", "-f", "--Output=JSON", f"{self.media}"]
         r = subprocess.run(cmd, capture_output=True, text=True)
         data = json.loads(r.stdout)
@@ -42,6 +65,7 @@ class Reader:
             raise ValueError(f"Expected 'media' inside of mediainfo output of {self.media}")
         for idx, item in enumerate(data['media']['track']):
             if item['@type'] == "Video":
+                # metrics collecting from json data
                 format_string = item.get("Format_String")
                 plain_format = item.get("Format")
                 height = item.get("Height")
@@ -50,6 +74,10 @@ class Reader:
                 sampled_w = item.get("Sampled_Width")
                 stored_h = item.get("Stored_Height")
                 stored_w = item.get("Stored_Width")
+                fps_num = item.get("FrameRate_Num")
+                fps_den = item.get("FrameRate_Den")
+                fps = item.get("FrameRate")
+                
                 
                 # logic for video codec information
                 if args.input_video_codec:
@@ -90,3 +118,21 @@ class Reader:
                 else:
                     raise ValueError("[ERROR] height, stored height, and sampled height was not found. Please pass it in")
                 
+                
+                if (args.input_fps_den and not args.input_fps_num) or (not args.input_fps_den and args.input_fps_num):
+                    raise ValueError("[ERROR] FPS denominator and numerator are required together to use these commands")
+                elif args.input_fps_den and args.fps_num:
+                    if ((fps_den and fps_num) or fps):
+                        print("[WARNING] Video fps num/den was provided even though the media already exposes it. Using the provided value.")
+                    self.fps_num = int(args.input_fps_num)
+                    self.fps_den = int(args.input_fps_den)
+                elif (fps_den and fps_num):
+                    self.fps_num = int(fps_num)
+                    self.fps_den = int(fps_den)
+                elif fps:
+                    flt_fps = float(fps)
+                    for value, (num, den) in self.common_fps:
+                        if abs(flt_fps - value) < 0.001:
+                            self.fps_num = num
+                            self.fps_den = den 
+                            break

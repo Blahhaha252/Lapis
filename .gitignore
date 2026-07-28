@@ -1,6 +1,6 @@
 __pycache__/
 *.pyc
-
 *.json
 *.mkv
 *.mp4
+commands.txt
