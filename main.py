@@ -6,6 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from reader import Reader
+from PIL import Image as img
 AUDIO_BITRATE_PER_CHANNEL = {
     144: 80_000,
     240: 96_000,
@@ -442,12 +443,49 @@ def write_content_json(paths, args):
 
     json_path = paths["root"] / json_filename
 
-    content_data = {
-        "rating": args.rating,
-        "type": args.content_type,
-    }
+    # Movie-like content gets a simple JSON file.
+    if args.content_type not in ("show", "anime"):
+        content_data = {
+            "rating": args.rating,
+            "type": args.content_type,
+        }
 
-    with open(json_path, "w", encoding="utf-8") as file:
+    # Shows and anime keep episode information.
+    else:
+        if json_path.exists():
+            with open(
+                json_path,
+                "r",
+                encoding="utf-8",
+            ) as file:
+                content_data = json.load(file)
+        else:
+            content_data = {
+                "rating": args.rating,
+                "type": args.content_type,
+                "episodes": {},
+            }
+
+        # Always refresh these values.
+        content_data["rating"] = args.rating
+        content_data["type"] = args.content_type
+
+        if args.show_name:
+            content_data["name"] = args.show_name
+
+        if "episodes" not in content_data:
+            content_data["episodes"] = {}
+
+        if args.episode and args.episode_name:
+            content_data["episodes"][args.episode] = (
+                args.episode_name
+            )
+
+    with open(
+        json_path,
+        "w",
+        encoding="utf-8",
+    ) as file:
         json.dump(
             content_data,
             file,
@@ -907,6 +945,43 @@ def main(path, args):
         subtitles,
         paths,
     )
+    
+    if args.cover_art is not None:
+        image_exists, image_isfile = check_path(
+            args.cover_art
+        )
+
+        if not image_exists:
+            raise ValueError(
+                "[ERROR] Cover art does not exist."
+            )
+
+        if not image_isfile:
+            raise ValueError(
+                "[ERROR] Cover art path is not a file."
+            )
+
+        cover_output = (
+            paths["root"]
+            / f"{args.imdb}.png"
+        )
+
+        with Image.open(args.cover_art) as image:
+            # Preserve transparency where possible.
+            if image.mode not in ("RGB", "RGBA"):
+                image = image.convert("RGBA")
+
+            image.save(
+                cover_output,
+                format="PNG",
+                optimize=True,
+                compress_level=9,
+            )
+
+        print(
+            f"[INFO] Saved cover art: "
+            f"{cover_output}"
+        )
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Lapis, a media digestion pipeline"
@@ -990,7 +1065,10 @@ if __name__ == "__main__":
         default="./test.mkv",
         help="Path to the input media file",
     )
+    parser.add_argument("--show-name" type=str, default=None)
+    parser.add_argument("--episode-name", type=str, default=None)
     parser.add_argument("--imdb", help="IMDB ID")
+    parser.add_argument("--cover-art", type=str, default=None)
     parser.add_argument("--nice", type=int, help="Nice value for ubuntu/linux to use for managing")
     args = parser.parse_args()
 
