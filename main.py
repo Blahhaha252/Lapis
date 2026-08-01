@@ -405,16 +405,17 @@ def build_output_paths(source_path, args):
 
     if is_episode_content(args.content_type):
         episode_name = f"e{args.episode}"
-
         original_name = f"{episode_name}{extension}"
 
         if args.season is not None:
-            season_name = f"s{args.season}"
-            hls_root = root / "hls" / season_name / episode_name
-            original_path = root / season_name / original_name
+            season_root = root / f"s{args.season}"
+
+            original_path = season_root / original_name
+            hls_root = season_root / "hls" / episode_name
+
         else:
-            hls_root = root / "hls" / episode_name
             original_path = root / original_name
+            hls_root = root / "hls" / episode_name
 
     else:
         original_name = f"{args.imdb}{extension}"
