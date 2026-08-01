@@ -404,16 +404,27 @@ def build_output_paths(source_path, args):
     extension = source_path.suffix
 
     if is_episode_content(args.content_type):
-        original_name = f"{args.episode}{extension}"
-        hls_root = root / "hls" / str(args.episode)
+        episode_name = f"e{args.episode}"
+
+        original_name = f"{episode_name}{extension}"
+
+        if args.season is not None:
+            season_name = f"s{args.season}"
+            hls_root = root / "hls" / season_name / episode_name
+            original_path = root / season_name / original_name
+        else:
+            hls_root = root / "hls" / episode_name
+            original_path = root / original_name
+
     else:
         original_name = f"{args.imdb}{extension}"
+        original_path = root / original_name
         hls_root = root / "hls"
 
-    original_path = root / original_name
     vtt_root = hls_root / "vtt"
     master_path = hls_root / "master.m3u8"
 
+    original_path.parent.mkdir(parents=True, exist_ok=True)
     hls_root.mkdir(parents=True, exist_ok=True)
     vtt_root.mkdir(parents=True, exist_ok=True)
 
@@ -1065,11 +1076,12 @@ if __name__ == "__main__":
         default="./test.mkv",
         help="Path to the input media file",
     )
-    parser.add_argument("--show-name" type=str, default=None)
+    parser.add_argument("--show-name", type=str, default=None)
     parser.add_argument("--episode-name", type=str, default=None)
     parser.add_argument("--imdb", help="IMDB ID")
     parser.add_argument("--cover-art", type=str, default=None)
     parser.add_argument("--nice", type=int, help="Nice value for ubuntu/linux to use for managing")
+    parser.add_argument("--season", type=int)
     args = parser.parse_args()
-
+    
     main(args.input, args)
