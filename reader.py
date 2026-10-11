@@ -163,8 +163,10 @@ class Reader:
         return self.get_track_metadata(track)
 
     def probe_media(self):
-        if os.path.exists(self.media_probe):
-            bundled = self.media_probe
+        
+        if self.media_probe_path is not None:
+            if os.path.exists(self.media_probe_path) and os.path.is_file(self.media_probe_path)
+            bundled = self.media_probe_path
         binary = str(bundled) if bundled.is_file() else "mediainfo"
         result = subprocess.run(
             [binary, "-f", "--Output=JSON", str(self.media)],
