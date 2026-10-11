@@ -61,7 +61,7 @@ class Reader:
         self.fps_num = None
         self.fps_den = None
         self.fps = None
-        self.media_probe = media_probe_path
+        self.media_probe_path = media_probe_path
         self.crf_info = None
         self.audio_codec = None
         self.audio_bitrate = None
@@ -163,10 +163,11 @@ class Reader:
         return self.get_track_metadata(track)
 
     def probe_media(self):
-        
+        bundled = None
+
         if self.media_probe_path is not None:
             if os.path.exists(self.media_probe_path) and os.path.is_file(self.media_probe_path):
-            bundled = self.media_probe_path
+                bundled = self.media_probe_path
         binary = str(bundled) if bundled.is_file() else "mediainfo"
         result = subprocess.run(
             [binary, "-f", "--Output=JSON", str(self.media)],
