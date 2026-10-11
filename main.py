@@ -1313,7 +1313,7 @@ if __name__ == "__main__":
                         help="Zero-based audio track to play by default.")
     parser.add_argument("--skip-unsupported-subtitles", action="store_true",
                         help="Explicitly omit image/specialist subtitle formats from HLS; originals remain intact.")
-    parer.add_argument("--mediainfo-path", "-MIP", type=str, default=None)
+    parser.add_argument("--mediainfo-path", "-MIP", type=str, default=None)
     args = parser.parse_args()
     
     main(args.input, args)
