@@ -165,7 +165,7 @@ class Reader:
     def probe_media(self):
         
         if self.media_probe_path is not None:
-            if os.path.exists(self.media_probe_path) and os.path.is_file(self.media_probe_path)
+            if os.path.exists(self.media_probe_path) and os.path.is_file(self.media_probe_path):
             bundled = self.media_probe_path
         binary = str(bundled) if bundled.is_file() else "mediainfo"
         result = subprocess.run(
