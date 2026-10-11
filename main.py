@@ -1,12 +1,16 @@
 import os
+import re
+import tempfile
+import fcntl
 import argparse
 import json
 import math
 import shutil
 import subprocess
+import yaml
 from pathlib import Path
-from reader import Reader
-from PIL import Image as img
+from reader import Reader, normalize_track_language, language_display_name
+from PIL import Image
 AUDIO_BITRATE_PER_CHANNEL = {
     144: 80_000,
     240: 96_000,
@@ -45,45 +49,61 @@ CRF_SETTINGS = {
     1440: 23,
     2160: 23,
 }
-LANGUAGE_NAMES = {
-    "en": "English",
-    "eng": "English",
-
-    "es": "Spanish",
-    "spa": "Spanish",
-
-    "fr": "French",
-    "fra": "French",
-    "fre": "French",
-
-    "de": "German",
-    "deu": "German",
-    "ger": "German",
-
-    "it": "Italian",
-    "ita": "Italian",
-
-    "pt": "Portuguese",
-    "por": "Portuguese",
-
-    "ja": "Japanese",
-    "jpn": "Japanese",
-
-    "ko": "Korean",
-    "kor": "Korean",
-
-    "zh": "Chinese",
-    "zho": "Chinese",
-    "chi": "Chinese",
-
-    "ru": "Russian",
-    "rus": "Russian",
+RATING_PRIORITY = {
+    "TV-Y": 0,
+    "G": 1,
+    "TV-Y7": 2,
+    "TV-Y7-FV": 3,
+    "TV-G": 4,
+    "PG": 5,
+    "TV-PG": 6,
+    "PG-13": 7,
+    "TV-14": 8,
+    "R": 9,
+    "TV-MA": 10,
+    "NC-17": 11,
+    "NR": 12,
 }
-def get_language_name(language):
-    return LANGUAGE_NAMES.get(
-        language.lower(),
-        language,
+def get_subtitle_display_name(subtitle):
+    display_name = (
+        subtitle.get("language_name")
+        or get_language_name(
+            subtitle["language"]
+        )
     )
+
+    title = subtitle.get("title")
+
+    if title:
+        normalized_title = title.strip()
+
+        if (
+            normalized_title
+            and normalized_title.lower()
+            not in display_name.lower()
+        ):
+            display_name = (
+                f"{display_name} ({normalized_title})"
+            )
+
+    elif subtitle.get("hearing_impaired"):
+        display_name = (
+            f"{display_name} (SDH)"
+        )
+
+    if subtitle.get("forced"):
+        if "forced" not in display_name.lower():
+            display_name = (
+                f"{display_name} (Forced)"
+            )
+
+    return display_name
+def escape_hls_attribute(value):
+    # HLS quoted strings cannot contain a literal double quote or a line break.
+    # Backslash-escaping quotes is not defined by HLS; use a readable apostrophe.
+    return " ".join(str(value).replace('"', "'").split()).strip()
+def get_language_name(language):
+    return language_display_name(normalize_track_language(language))
 def write_vtt_playlist(
     playlist_path,
     vtt_filename,
@@ -93,7 +113,7 @@ def write_vtt_playlist(
 
     content = (
         "#EXTM3U\n"
-        "#EXT-X-VERSION:3\n"
+        "#EXT-X-VERSION:7\n"
         f"#EXT-X-TARGETDURATION:{target_duration}\n"
         "#EXT-X-MEDIA-SEQUENCE:0\n"
         f"#EXTINF:{duration:.3f},\n"
@@ -132,6 +152,7 @@ def extract_subtitles(
     subtitle_tracks,
     paths,
     duration,
+    skip_unsupported=False,
 ):
     subtitle_outputs = []
 
@@ -139,7 +160,14 @@ def extract_subtitles(
         index = subtitle["index"]
         language = subtitle["language"]
 
-        subtitle_name = f"{language}-{index}"
+        bitmap_codecs = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub", "dvb_teletext", "arib_caption"}
+        if subtitle.get("codec") in bitmap_codecs:
+            message = f"Subtitle {index} ({subtitle.get('codec')}) needs OCR or a specialist converter before WebVTT export."
+            if skip_unsupported:
+                print(f"[WARNING] {message} Explicitly skipped; original file still contains it.")
+                continue
+            raise ValueError(message + " Use --skip-unsupported-subtitles only if you want to omit it from HLS.")
+        subtitle_name = f"subtitle-{index:03d}"
 
         vtt_path = (
             paths["vtt"]
@@ -157,7 +185,7 @@ def extract_subtitles(
             "-i",
             str(source_path),
             "-map",
-            f"0:s:{index}",
+            subtitle.get("stream_selector", f"0:s:{index}"),
             "-c:s",
             "webvtt",
             str(vtt_path),
@@ -173,18 +201,27 @@ def extract_subtitles(
             check=True,
         )
 
+        text = vtt_path.read_text(encoding="utf-8-sig")
+        if not text.startswith("WEBVTT"):
+            raise ValueError(f"Subtitle {index} did not produce valid WebVTT.")
+        text = text.replace("WEBVTT", "WEBVTT\nX-TIMESTAMP-MAP=LOCAL:00:00:00.000,MPEGTS:90000", 1)
+        vtt_path.write_text(text, encoding="utf-8")
         write_vtt_playlist(
             playlist_path,
             vtt_path.name,
             duration,
         )
 
-        subtitle_outputs.append({
-            "index": index,
-            "language": language,
+        subtitle_output = dict(subtitle)
+
+        subtitle_output.update({
             "vtt_path": vtt_path,
             "playlist_path": playlist_path,
         })
+
+        subtitle_outputs.append(
+            subtitle_output
+        )
 
     return subtitle_outputs
 def get_segment_duration(segment_path):
@@ -286,225 +323,382 @@ def relative_hls_path(path, hls_root):
         path,
         hls_root,
     ).replace(os.sep, "/")
-def write_master_playlist(
-    renditions,
-    subtitles,
-    paths,
-):
-    lines = [
-        "#EXTM3U",
-        "#EXT-X-VERSION:3",
-        "#EXT-X-INDEPENDENT-SEGMENTS",
-    ]
+def apply_track_overrides(reader, args):
+    """Overrides use zero-based indices within audio or subtitle streams."""
+    for kind, tracks in (("audio", reader.audio_tracks), ("subtitle", reader.subtitle_tracks)):
+        for field in ("language", "title"):
+            for value in getattr(args, f"{kind}_{field}", None) or []:
+                index_text, separator, replacement = value.partition("=")
+                if not separator or not index_text.isdigit() or int(index_text) >= len(tracks):
+                    raise ValueError(f"--{kind}-{field}: use an existing zero-based index, e.g. 0=eng")
+                track = tracks[int(index_text)]
+                if field == "language":
+                    tag = normalize_track_language(replacement)
+                    if tag == "und" and replacement.strip().lower() != "und":
+                        raise ValueError("Use a language tag such as en, yue, pt-BR or x-custom; put free text in --audio-title/--subtitle-title.")
+                    track.update(language=tag, language_region=tag, language_short=tag.split('-')[0],
+                                 language_name=language_display_name(tag))
+                else:
+                    track["title"] = replacement
+    default = getattr(args, "default_audio", None)
+    if default is not None:
+        if not 0 <= default < len(reader.audio_tracks):
+            raise ValueError("--default-audio must name an existing zero-based audio track.")
+        for track in reader.audio_tracks:
+            track["default"] = track["index"] == default
 
-    subtitle_group = None
 
+def hls_timestamp_options():
+    # All separate encodes keep the same input timeline. A fixed positive offset
+    # leaves room for AAC encoder priming/B-frame DTS without per-stream shifts.
+    return ["-avoid_negative_ts", "disabled", "-output_ts_offset", "1",
+            "-hls_segment_options", "mpegts_copyts=1"]
+
+
+def clean_segments(folder, pattern):
+    # Only generated segments for this rendition; no recursive user-file deletion.
+    for old in folder.glob(pattern):
+        old.unlink()
+
+
+def encode_audio_renditions(source_path, tracks, renditions, paths, args):
+    """Encode every input audio stream; reuse identical settings across qualities."""
+    cache = {}
+    groups = {}
+    for rendition in renditions:
+        if not tracks:
+            continue
+        outputs = []
+        for track in tracks:
+            settings = choose_audio_settings(track["channels"], rendition["height"], rendition["original"])
+            key = (track["index"], settings["channels"], settings["bitrate"])
+            if key not in cache:
+                name = f'track-{key[0]:03d}-{key[1]}ch-{key[2]}'
+                root = paths["hls"] / "audio" / name
+                root.mkdir(parents=True, exist_ok=True)
+                clean_segments(root, "audio-segment-*.ts")
+                playlist = root / "audio-playlist.m3u8"
+                command = ["ffmpeg", "-y", "-copyts", "-start_at_zero", "-i", str(source_path),
+                           "-map", track["stream_selector"], "-vn", "-sn", "-dn",
+                           "-c:a", "aac", "-profile:a", "aac_low", "-ar", "48000",
+                           "-ac", str(settings["channels"]), "-b:a", str(settings["bitrate"]),
+                           "-map_metadata", "-1", "-metadata:s:a:0", f'language={track["language"]}',
+                           "-f", "hls", "-hls_time", "10", "-hls_playlist_type", "vod",
+                           "-hls_list_size", "0", "-hls_segment_type", "mpegts",
+                           *hls_timestamp_options(), "-hls_segment_filename", str(root / "audio-segment-%05d.ts"),
+                           str(playlist)]
+                if args.nice is not None:
+                    command = ["nice", "-n", str(args.nice), *command]
+                print(f'[INFO] Encoding audio {track["index"]}: {get_audio_display_name(track)} ({settings["channels"]} channels)')
+                subprocess.run(command, check=True)
+                output = dict(track, name=name, playlist_path=playlist, rendition_root=root,
+                              output_channels=settings["channels"], output_bitrate=settings["bitrate"])
+                peak, average = calculate_rendition_bitrates(output)
+                output.update(measured_peak_bitrate=peak, measured_average_bitrate=average)
+                cache[key] = output
+            outputs.append(cache[key])
+        group_key = tuple(item["name"] for item in outputs)
+        existing = next((group_id for group_id, members in groups.items()
+                         if tuple(item["name"] for item in members) == group_key), None)
+        group_id = existing or f"audio-{len(groups)}"
+        groups[group_id] = outputs
+        rendition["audio_group"] = group_id
+    return groups
+
+
+def get_audio_display_name(track):
+    label = track.get("language_name") or get_language_name(track.get("language", "und"))
+    title = track.get("title")
+    if title:
+        label = f"{label} — {title}"
+    if track.get("visual_impaired") and "description" not in label.lower():
+        label += " (Audio description)"
+    if track.get("commentary") and "commentary" not in label.lower():
+        label += " (Commentary)"
+    return label
+
+
+def unique_track_names(tracks, label_function):
+    used = set()
+    labels = []
+    for track in tracks:
+        base = escape_hls_attribute(label_function(track)) or "Undetermined"
+        label = base
+        suffix = 2
+        while label in used:
+            label = f"{base} ({suffix})"
+            suffix += 1
+        used.add(label)
+        labels.append(label)
+    return labels
+
+
+def default_track_index(tracks):
+    return next((i for i, track in enumerate(tracks) if track.get("default")), 0)
+
+
+def read_video_codec(rendition):
+    """Read the actual H.264 SPS profile/compatibility/level for CODECS."""
+    segment = next(iter(sorted(rendition["rendition_root"].glob("*-segment-*.ts"))))
+    result = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                             "stream=extradata", "-show_data", "-of", "json", str(segment)],
+                            check=True, capture_output=True, text=True)
+    streams = json.loads(result.stdout).get("streams", [])
+    dump = streams[0].get("extradata", "") if streams else ""
+    raw = bytearray()
+    for line in dump.splitlines():
+        if ": " in line:
+            hex_part = line.split(": ", 1)[1].split("  ", 1)[0]
+            raw.extend(bytes.fromhex(hex_part))
+    match = re.search(b"\x00\x00\x01\x67(.{3})", bytes(raw), re.S)
+    if not match:
+        raise ValueError("Could not determine encoded H.264 codec parameters.")
+    return "avc1." + match.group(1).hex()
+
+
+def write_tracks_metadata(reader, audio_groups, subtitles, paths):
+    def plain(track):
+        return {key: relative_hls_path(value, paths["hls"]) if isinstance(value, Path) else value
+                for key, value in track.items() if key != "rendition_root"}
+    data = {"version": 1, "audio": reader.audio_tracks, "subtitles": reader.subtitle_tracks,
+            "audio_groups": {key: [plain(item) for item in members] for key, members in audio_groups.items()},
+            "published_subtitles": [plain(track) for track in subtitles], "timestamp_offset_seconds": 1}
+    paths["hls"].joinpath("tracks.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def write_master_playlist(renditions, subtitles, paths, audio_groups=None):
+    audio_groups = audio_groups or {}
+    lines = ["#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-INDEPENDENT-SEGMENTS"]
+    for group_id, tracks in audio_groups.items():
+        default = default_track_index(tracks)
+        labels = unique_track_names(tracks, get_audio_display_name)
+        seen = set()
+        # Process the default first when deciding which duplicate-language member
+        # should auto-select; manual selection still exposes every track.
+        auto = set()
+        for index in [default, *(i for i in range(len(tracks)) if i != default)]:
+            track = tracks[index]
+            signature = (track["language"], bool(track.get("visual_impaired")), bool(track.get("hearing_impaired")))
+            if signature not in seen:
+                auto.add(index); seen.add(signature)
+        for index, track in enumerate(tracks):
+            attrs = ["TYPE=AUDIO", f'GROUP-ID="{group_id}"', f'NAME="{labels[index]}"',
+                     f'LANGUAGE="{escape_hls_attribute(track["language"])}"',
+                     f'DEFAULT={"YES" if index == default else "NO"}',
+                     f'AUTOSELECT={"YES" if index in auto else "NO"}',
+                     f'CHANNELS="{track["output_channels"]}"']
+            characteristics = []
+            if track.get("visual_impaired"):
+                characteristics.append("public.accessibility.describes-video")
+            if track.get("hearing_impaired"):
+                characteristics.append("public.accessibility.describes-music-and-sound")
+            if characteristics:
+                attrs.append('CHARACTERISTICS="' + ','.join(characteristics) + '"')
+            attrs.append(f'URI="{escape_hls_attribute(relative_hls_path(track["playlist_path"], paths["hls"]))}"')
+            lines.append("#EXT-X-MEDIA:" + ",".join(attrs))
     if subtitles:
-        subtitle_group = "subtitles"
-
-        for subtitle_number, subtitle in enumerate(
-            subtitles
-        ):
-            language = subtitle["language"]
-
-            display_name = get_language_name(
-                language
-            )
-
-            subtitle_uri = relative_hls_path(
-                subtitle["playlist_path"],
-                paths["hls"],
-            )
-
-            if subtitle_number == 0:
-                default_value = "YES"
-            else:
-                default_value = "NO"
-
-            lines.append(
-                "#EXT-X-MEDIA:"
-                "TYPE=SUBTITLES,"
-                f'GROUP-ID="{subtitle_group}",'
-                f'NAME="{display_name}",'
-                f'LANGUAGE="{language}",'
-                f"DEFAULT={default_value},"
-                "AUTOSELECT=YES,"
-                f'URI="{subtitle_uri}"'
-            )
-
-    sorted_renditions = sorted(
-        renditions,
-        key=lambda item: item["height"],
-    )
-
-    for rendition in sorted_renditions:
-        fps = (
-            rendition["fps_num"]
-            / rendition["fps_den"]
-        )
-
-        playlist_uri = relative_hls_path(
-            rendition["playlist_path"],
-            paths["hls"],
-        )
-
-        attributes = [
-            (
-                "BANDWIDTH="
-                f'{rendition["measured_peak_bitrate"]}'
-            ),
-            (
-                "AVERAGE-BANDWIDTH="
-                f'{rendition["measured_average_bitrate"]}'
-            ),
-            (
-                "RESOLUTION="
-                f'{rendition["width"]}x'
-                f'{rendition["height"]}'
-            ),
-            f"FRAME-RATE={fps:.3f}",
-            'CODECS="avc1.640028,mp4a.40.2"',
-        ]
-
-        if subtitle_group:
-            attributes.append(
-                f'SUBTITLES="{subtitle_group}"'
-            )
-
-        lines.append(
-            "#EXT-X-STREAM-INF:"
-            + ",".join(attributes)
-        )
-
-        lines.append(playlist_uri)
-
-    lines.append("")
-
-    with open(
-        paths["master"],
-        "w",
-        encoding="utf-8",
-    ) as file:
-        file.write("\n".join(lines))
-
-    print(
-        f"[INFO] Wrote master playlist: "
-        f'{paths["master"]}'
-    )
+        default = default_track_index(subtitles)
+        labels = unique_track_names(subtitles, get_subtitle_display_name)
+        seen = set()
+        auto = set()
+        for index in [default, *(i for i in range(len(subtitles)) if i != default)]:
+            track = subtitles[index]
+            signature = (track["language"], bool(track.get("forced")), bool(track.get("hearing_impaired")))
+            if signature not in seen:
+                auto.add(index); seen.add(signature)
+        for index, track in enumerate(subtitles):
+            attrs = ["TYPE=SUBTITLES", 'GROUP-ID="subtitles"', f'NAME="{labels[index]}"',
+                     f'LANGUAGE="{escape_hls_attribute(track["language"])}"',
+                     f'DEFAULT={"YES" if index == default else "NO"}',
+                     f'AUTOSELECT={"YES" if index in auto else "NO"}',
+                     f'FORCED={"YES" if track.get("forced") else "NO"}']
+            if track.get("hearing_impaired"):
+                attrs.append('CHARACTERISTICS="public.accessibility.transcribes-spoken-dialog,public.accessibility.describes-music-and-sound"')
+            attrs.append(f'URI="{escape_hls_attribute(relative_hls_path(track["playlist_path"], paths["hls"]))}"')
+            lines.append("#EXT-X-MEDIA:" + ",".join(attrs))
+    for rendition in sorted(renditions, key=lambda item: item["height"]):
+        audio = audio_groups.get(rendition.get("audio_group"), [])
+        peak = rendition["measured_peak_bitrate"] + max((item["measured_peak_bitrate"] for item in audio), default=0)
+        average = rendition["measured_average_bitrate"] + max((item["measured_average_bitrate"] for item in audio), default=0)
+        codec = read_video_codec(rendition)
+        if audio:
+            codec += ",mp4a.40.2"
+        attrs = [f"BANDWIDTH={peak}", f"AVERAGE-BANDWIDTH={average}",
+                 f'RESOLUTION={rendition["width"]}x{rendition["height"]}',
+                 f'FRAME-RATE={rendition["fps_num"] / rendition["fps_den"]:.3f}', f'CODECS="{codec}"']
+        if audio:
+            attrs.append(f'AUDIO="{rendition["audio_group"]}"')
+        if subtitles:
+            attrs.append('SUBTITLES="subtitles"')
+        lines += ["#EXT-X-STREAM-INF:" + ",".join(attrs), relative_hls_path(rendition["playlist_path"], paths["hls"])]
+    # Publish the new manifest only after every requested stream has succeeded.
+    temporary = paths["master"].with_suffix(".m3u8.tmp")
+    temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(temporary, paths["master"])
+    print(f'[INFO] Wrote master playlist: {paths["master"]}')
 def is_episode_content(content_type):
     return content_type.lower() in ("show", "anime")
 
 
+def normalize_language(value):
+    """Return a safe, lowercase language directory name; no language means legacy."""
+    if value is None:
+        return None
+    language = value.strip().lower()
+    if not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", language):
+        raise ValueError("Language must be a name/code such as japanese, english, ja, or pt-br.")
+    return language
+
+
 def build_output_paths(source_path, args):
+    language = normalize_language(getattr(args, "language", None))
+    if language and not is_episode_content(args.content_type):
+        raise ValueError("--language currently applies to show/anime episodes only.")
+    if not re.fullmatch(r"(?:tt)?[0-9]+", str(args.imdb)):
+        raise ValueError("Supply a numeric IMDb ID, optionally prefixed with tt.")
+    if is_episode_content(args.content_type):
+        if args.episode is None or args.episode < 0:
+            raise ValueError("Show/anime input requires a non-negative --episode.")
+        if args.season is not None and args.season < 0:
+            raise ValueError("Season must be non-negative.")
+
+    with open("./config.yml", "r", encoding="utf-8") as file:
+        config = yaml.safe_load(file)
+    root = Path(config["output"]) / str(args.imdb)
     source_path = Path(source_path)
-
-    root = Path(str(args.imdb))
-    root.mkdir(parents=True, exist_ok=True)
-
     extension = source_path.suffix
 
     if is_episode_content(args.content_type):
-        episode_name = f"e{args.episode}"
-        original_name = f"{episode_name}{extension}"
-
-        if args.season is not None:
-            season_root = root / f"s{args.season}"
-
-            original_path = season_root / original_name
-            hls_root = season_root / "hls" / episode_name
-
-        else:
-            original_path = root / original_name
-            hls_root = root / "hls" / episode_name
-
+        season_root = root / f"s{args.season}" if args.season is not None else root
+        original_root = season_root / language if language else season_root
+        hls_parent = season_root / "hls"
+        if language:
+            hls_parent = hls_parent / language
+        original_path = original_root / f"e{args.episode}{extension}"
+        hls_root = hls_parent / f"e{args.episode}"
     else:
-        original_name = f"{args.imdb}{extension}"
-        original_path = root / original_name
+        original_path = root / f"{args.imdb}{extension}"
         hls_root = root / "hls"
 
-    vtt_root = hls_root / "vtt"
-    master_path = hls_root / "master.m3u8"
-
-    original_path.parent.mkdir(parents=True, exist_ok=True)
-    hls_root.mkdir(parents=True, exist_ok=True)
-    vtt_root.mkdir(parents=True, exist_ok=True)
-
-    return {
+    paths = {
         "root": root,
         "original": original_path,
         "hls": hls_root,
-        "vtt": vtt_root,
-        "master": master_path,
+        "vtt": hls_root / "vtt",
+        "master": hls_root / "master.m3u8",
     }
+    for directory in (original_path.parent, hls_root, paths["vtt"]):
+        directory.mkdir(parents=True, exist_ok=True)
+    return paths
+
+
 def copy_original(source_path, output_path):
+    # Allow rerendering an original that is already in the output tree.
+    if Path(source_path).resolve() == Path(output_path).resolve():
+        return
     print(f"[INFO] Copying original to {output_path}")
+    shutil.copy2(source_path, output_path)
 
-    shutil.copy2(
-        source_path,
-        output_path,
-    )
-def write_content_json(paths, args):
-    text_rating = get_text_rating(args.rating)
 
-    if text_rating:
-        json_filename = (
-            f"{args.content_type}-{text_rating}.json"
+def highest_rating(*values):
+    ratings = [str(value).upper() for value in values if value]
+    for rating in ratings:
+        if rating not in RATING_PRIORITY:
+            raise ValueError(f"Unknown content rating: {rating}")
+    return max(ratings, key=RATING_PRIORITY.get) if ratings else "NR"
+
+
+def language_container(container, language):
+    """Migrate the one-language shorthand without losing its episode map."""
+    old_language = container.pop("language", None)
+    if old_language:
+        old_language = normalize_language(old_language)
+        variants = container.setdefault("languages", {})
+        existing = variants.setdefault(old_language, {"language": old_language})
+        existing["episodes"] = {**container.pop("episodes", {}), **existing.get("episodes", {})}
+        for key in ("rating", "year"):
+            if key in container:
+                existing.setdefault(key, container[key])
+    if language:
+        return container.setdefault("languages", {}).setdefault(
+            language, {"language": language, "episodes": {}}
         )
+    return container
+
+
+def write_content_json(paths, args):
+    language = normalize_language(getattr(args, "language", None))
+    episodic = is_episode_content(args.content_type)
+    if language and not episodic:
+        raise ValueError("--language currently applies to show/anime episodes only.")
+    if episodic:
+        filename = f"{args.content_type}.json"
     else:
-        json_filename = f"{args.content_type}.json"
+        category = get_text_rating(args.rating)
+        filename = f"{args.content_type}{'-' + category if category else ''}.json"
+    json_path = paths["root"] / filename
 
-    json_path = paths["root"] / json_filename
-
-    # Movie-like content gets a simple JSON file.
-    if args.content_type not in ("show", "anime"):
-        content_data = {
-            "rating": args.rating,
-            "type": args.content_type,
-        }
-
-    # Shows and anime keep episode information.
-    else:
+    # Linux advisory lock covers the complete read/merge/write, so simultaneous
+    # English and Japanese encodes cannot overwrite each other's JSON updates.
+    with open(paths["root"] / ".metadata.lock", "a", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
         if json_path.exists():
-            with open(
-                json_path,
-                "r",
-                encoding="utf-8",
-            ) as file:
-                content_data = json.load(file)
+            content_data = json.loads(json_path.read_text(encoding="utf-8"))
         else:
-            content_data = {
-                "rating": args.rating,
-                "type": args.content_type,
-                "episodes": {},
-            }
-
-        # Always refresh these values.
-        content_data["rating"] = args.rating
+            content_data = {}
         content_data["type"] = args.content_type
 
-        if args.show_name:
-            content_data["name"] = args.show_name
-
-        if "episodes" not in content_data:
-            content_data["episodes"] = {}
-
-        if args.episode and args.episode_name:
-            content_data["episodes"][args.episode] = (
-                args.episode_name
+        if episodic:
+            if args.show_name:
+                content_data["name"] = args.show_name
+            # 'season' is accepted on read; new output always uses 'seasons'.
+            seasons = content_data.setdefault("seasons", content_data.pop("season", {}))
+            container = seasons.setdefault(str(args.season), {}) if args.season is not None else content_data
+            variant = language_container(container, language)
+            variant["rating"] = highest_rating(variant.get("rating"), args.rating)
+            if args.year:
+                variant["year"] = str(args.year)
+            episode_number = str(args.episode)
+            episodes = variant.setdefault("episodes", {})
+            if args.episode_name:
+                previous = episodes.get(episode_number)
+                if isinstance(previous, dict):
+                    episodes[episode_number] = {**previous, "name": args.episode_name}
+                else:
+                    episodes[episode_number] = args.episode_name
+            else:
+                episodes.setdefault(episode_number, f"Episode {episode_number}")
+            container["rating"] = highest_rating(
+                container.get("rating"),
+                *(item.get("rating") for item in container.get("languages", {}).values()),
             )
+            content_data["rating"] = highest_rating(
+                content_data.get("rating"),
+                *(item.get("rating") for item in seasons.values()),
+                *(item.get("rating") for item in content_data.get("languages", {}).values()),
+            )
+        else:
+            content_data["rating"] = args.rating
+            if args.movie_name:
+                content_data["name"] = args.movie_name
+            if args.year:
+                content_data["year"] = str(args.year)
 
-    with open(
-        json_path,
-        "w",
-        encoding="utf-8",
-    ) as file:
-        json.dump(
-            content_data,
-            file,
-            indent=4,
-        )
-
+        descriptor, temporary = tempfile.mkstemp(prefix=".metadata-", suffix=".tmp", dir=paths["root"])
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+                json.dump(content_data, file, indent=4, ensure_ascii=False)
+                file.write("\n")
+                file.flush()
+                os.fsync(file.fileno())
+            os.chmod(temporary, 0o644)
+            os.replace(temporary, json_path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
     print(f"[INFO] Wrote metadata: {json_path}")
+
+
 def rendition_fps_text(rendition):
     fps_num = rendition["fps_num"]
     fps_den = rendition["fps_den"]
@@ -536,6 +730,27 @@ def build_rendition_command(
     fps_num = rendition["fps_num"]
     fps_den = rendition["fps_den"]
 
+    # Pass the exact rational frame rate to FFmpeg.
+    # Examples: 24000/1001, 30000/1001, 25/1
+    fps_rate = f"{fps_num}/{fps_den}"
+
+    segment_duration = 10
+
+    # GOP size must be a whole number of frames.
+    # This rounds:
+    #
+    #     fps_num * segment_duration / fps_den
+    #
+    # without converting the frame rate to a float.
+    gop_size = max(
+        1,
+        (
+            fps_num * segment_duration
+            + fps_den // 2
+        )
+        // fps_den,
+    )
+
     command = []
 
     if args.nice is not None:
@@ -548,14 +763,15 @@ def build_rendition_command(
     command.extend([
         "ffmpeg",
         "-y",
+
+        "-copyts",
+        "-start_at_zero",
         "-i",
         str(source_path),
 
         "-map",
         "0:v:0",
-
-        "-map",
-        "0:a:0",
+        "-an",
 
         "-c:v",
         "libx264",
@@ -573,17 +789,12 @@ def build_rendition_command(
             f"{rendition['height']}"
         ),
 
+        # Exact fractional output frame rate.
         "-r",
-        f"{fps_num}/{fps_den}",
+        fps_rate,
 
-        "-c:a",
-        rendition["audio_codec"],
-
-        "-ac",
-        str(rendition["audio_channels"]),
-
-        "-b:a",
-        str(rendition["audio_bitrate"]),
+        "-sn",
+        "-dn",
     ])
 
     if rendition["rate_control"] == "crf":
@@ -604,12 +815,9 @@ def build_rendition_command(
             str(rendition["bufsize"]),
         ])
 
-    segment_duration = 6
-
-    fps = fps_num / fps_den
-    gop_size = max(1, round(fps * segment_duration))
-
     command.extend([
+        # Fixed GOP aligned approximately to the
+        # requested 10-second segment duration.
         "-g",
         str(gop_size),
 
@@ -619,8 +827,13 @@ def build_rendition_command(
         "-sc_threshold",
         "0",
 
+        # Force keyframes using timestamps, so this
+        # remains accurate for fractional frame rates.
         "-force_key_frames",
-        f"expr:gte(t,n_forced*{segment_duration})",
+        (
+            "expr:"
+            f"gte(t,n_forced*{segment_duration})"
+        ),
 
         "-f",
         "hls",
@@ -634,6 +847,13 @@ def build_rendition_command(
         "-hls_list_size",
         "0",
 
+        "-hls_flags",
+        "independent_segments",
+
+        "-hls_segment_type",
+        "mpegts",
+
+        *hls_timestamp_options(),
         "-hls_segment_filename",
         str(segment_pattern),
 
@@ -653,6 +873,7 @@ def encode_renditions(source_path, renditions, paths, args):
             exist_ok=True,
         )
 
+        clean_segments(rendition_root, "*-segment-*.ts")
         command, playlist_path = build_rendition_command(
             source_path,
             rendition,
@@ -699,7 +920,8 @@ def get_text_rating(rating):
 
     if rating in ("R", "NC-17", "TV-MA"):
         return "mature"
-
+    if rating in ("NR"):
+        return "unrated"
     raise ValueError(f"Unknown rating: {rating}")
 def audio_channel_cap_for_height(height):
     if height == 144:
@@ -713,6 +935,8 @@ def audio_channel_cap_for_height(height):
 
 
 def choose_audio_channels(source_channels, height, is_original):
+    if not source_channels:
+        return 0
     if is_original:
         return source_channels
 
@@ -784,16 +1008,14 @@ def scaled_width(source_width, source_height, target_height):
 
 
 def main(path, args):
+    paths = build_output_paths(path, args)
     qualities = [2160, 1440, 1080, 720, 480, 360, 240, 144]
 
     exists, is_file = check_path(path)
-    reader = Reader(path, exists, is_file)
+    reader = Reader(path, exists, is_file, args.mediainfo_path)
 
-    try:
-        reader.read(args)
-    except Exception as error:
-        print(error)
-        return
+    reader.read(args)
+    apply_track_overrides(reader, args)
 
     source_width = reader.video_width
     source_height = reader.video_height
@@ -911,24 +1133,11 @@ def main(path, args):
                 f', maxrate={rendition["maxrate"] / 1000:.0f}k'
                 f', bufsize={rendition["bufsize"] / 1000:.0f}k'
             )
-        description += (
-            f', audio=AAC'
-            f', channels={rendition["audio_channels"]}'
-            f', audio bitrate={rendition["audio_bitrate"] / 1000:.0f}k'
-            f' total'
-            f' ({rendition["audio_bitrate_per_channel"] / 1000:.0f}k/ch)'
-        )
+        description += f", {len(reader.audio_tracks)} separate audio track(s)"
         print(description)
-    paths = build_output_paths(path, args)
-
     copy_original(
         path,
         paths["original"],
-    )
-
-    write_content_json(
-        paths,
-        args,
     )
 
     encoded_renditions = encode_renditions(
@@ -937,15 +1146,15 @@ def main(path, args):
         paths,
         args,
     )
-    duration = get_media_duration(
-        path
-    )
+    audio_groups = encode_audio_renditions(path, reader.audio_tracks, encoded_renditions, paths, args)
+    duration = get_media_duration(path)
 
     subtitles = extract_subtitles(
         path,
         reader.subtitle_tracks,
         paths,
         duration,
+        skip_unsupported=getattr(args, "skip_unsupported_subtitles", False),
     )
 
     measure_renditions(
@@ -956,7 +1165,9 @@ def main(path, args):
         encoded_renditions,
         subtitles,
         paths,
+        audio_groups,
     )
+    write_tracks_metadata(reader, audio_groups, subtitles, paths)
     
     if args.cover_art is not None:
         image_exists, image_isfile = check_path(
@@ -994,6 +1205,10 @@ def main(path, args):
             f"[INFO] Saved cover art: "
             f"{cover_output}"
         )
+    # Publish episode metadata only after media, subtitles and cover succeed.
+    write_content_json(paths, args)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Lapis, a media digestion pipeline"
@@ -1065,11 +1280,11 @@ if __name__ == "__main__":
         default=None,
         help="Override detected CRF",
     )
-    parser.add_argument("--content-type", choices=["movie", "ova", "anime", "show"])
+    parser.add_argument("--content-type", required=True, choices=["movie", "ova", "anime", "show"])
     parser.add_argument(
         "-r", "--rating", required=True,
-        choices=["G", "PG", "PG-13", "R", "NC-17", "TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G", "TV-PG", "TV-14", "TV-MA"],
-        help="content rating (g, pg, pg-13, r, nc-17, tv-y, tv-y7, tv-y7-fv, tv-g, tv-pg, tv-14, tv-ma)"
+        choices=["G", "PG", "PG-13", "R", "NC-17", "TV-Y", "TV-Y7", "TV-Y7-FV", "TV-G", "TV-PG", "TV-14", "TV-MA", "NR"],
+        help="content rating (g, pg, pg-13, r, nc-17, tv-y, tv-y7, tv-y7-fv, tv-g, tv-pg, tv-14, tv-ma, NR (not rated))"
     )
     parser.add_argument("--episode", type=int)
     parser.add_argument(
@@ -1077,12 +1292,28 @@ if __name__ == "__main__":
         default="./test.mkv",
         help="Path to the input media file",
     )
+    parser.add_argument("--movie-name", type=str, default=None)
+    parser.add_argument("--year")
     parser.add_argument("--show-name", type=str, default=None)
     parser.add_argument("--episode-name", type=str, default=None)
-    parser.add_argument("--imdb", help="IMDB ID")
+    parser.add_argument("--imdb", required=True, help="IMDB ID")
     parser.add_argument("--cover-art", type=str, default=None)
     parser.add_argument("--nice", type=int, help="Nice value for ubuntu/linux to use for managing")
     parser.add_argument("--season", type=int)
+    parser.add_argument(
+        "--language", type=normalize_language, default=None,
+        help="Show/anime version and directory name, e.g. japanese or english. Omit for the legacy layout.",
+    )
+    for kind in ("audio", "subtitle"):
+        parser.add_argument(f"--{kind}-language", action="append", default=[], metavar="INDEX=TAG",
+                            help="Override a zero-based track language; repeat for more tracks. Does not translate audio/text.")
+        parser.add_argument(f"--{kind}-title", action="append", default=[], metavar="INDEX=TITLE",
+                            help="Override a zero-based track display title; Unicode names are supported.")
+    parser.add_argument("--default-audio", type=int, default=None, metavar="INDEX",
+                        help="Zero-based audio track to play by default.")
+    parser.add_argument("--skip-unsupported-subtitles", action="store_true",
+                        help="Explicitly omit image/specialist subtitle formats from HLS; originals remain intact.")
+    parer.add_argument("--mediainfo-path", "-MIP", type=str, default=None)
     args = parser.parse_args()
     
     main(args.input, args)
