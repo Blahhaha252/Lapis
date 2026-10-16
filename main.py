@@ -361,7 +361,7 @@ def clean_segments(folder, pattern):
         old.unlink()
 
 
-def encode_audio_renditions(source_path, tracks, renditions, paths, args):
+def _legacy_encode_audio_renditions_disabled(source_path, tracks, renditions, paths, args):
     """Encode every input audio stream; reuse identical settings across qualities."""
     cache = {}
     groups = {}
@@ -518,11 +518,10 @@ def write_master_playlist(renditions, subtitles, paths, audio_groups=None):
             lines.append("#EXT-X-MEDIA:" + ",".join(attrs))
     for rendition in sorted(renditions, key=lambda item: item["height"]):
         audio = audio_groups.get(rendition.get("audio_group"), [])
-        peak = rendition["measured_peak_bitrate"] + max((item["measured_peak_bitrate"] for item in audio), default=0)
-        average = rendition["measured_average_bitrate"] + max((item["measured_average_bitrate"] for item in audio), default=0)
+        peak = rendition["measured_peak_bitrate"] + (0 if audio else rendition.get("audio_bitrate", 0))
+        average = rendition["measured_average_bitrate"] + (0 if audio else rendition.get("audio_bitrate", 0))
         codec = read_video_codec(rendition)
-        if audio:
-            codec += ",mp4a.40.2"
+        codec += ",mp4a.40.2"
         attrs = [f"BANDWIDTH={peak}", f"AVERAGE-BANDWIDTH={average}",
                  f'RESOLUTION={rendition["width"]}x{rendition["height"]}',
                  f'FRAME-RATE={rendition["fps_num"] / rendition["fps_den"]:.3f}', f'CODECS="{codec}"']
@@ -552,8 +551,6 @@ def normalize_language(value):
 
 def build_output_paths(source_path, args):
     language = normalize_language(getattr(args, "language", None))
-    if language and not is_episode_content(args.content_type):
-        raise ValueError("--language currently applies to show/anime episodes only.")
     if not re.fullmatch(r"(?:tt)?[0-9]+", str(args.imdb)):
         raise ValueError("Supply a numeric IMDb ID, optionally prefixed with tt.")
     if is_episode_content(args.content_type):
@@ -577,8 +574,9 @@ def build_output_paths(source_path, args):
         original_path = original_root / f"e{args.episode}{extension}"
         hls_root = hls_parent / f"e{args.episode}"
     else:
-        original_path = root / f"{args.imdb}{extension}"
-        hls_root = root / "hls"
+        original_root = root / language if language else root
+        original_path = original_root / f"{args.imdb}{extension}"
+        hls_root = root / "hls" / language if language else root / "hls"
 
     paths = {
         "root": root,
@@ -629,8 +627,6 @@ def language_container(container, language):
 def write_content_json(paths, args):
     language = normalize_language(getattr(args, "language", None))
     episodic = is_episode_content(args.content_type)
-    if language and not episodic:
-        raise ValueError("--language currently applies to show/anime episodes only.")
     if episodic:
         filename = f"{args.content_type}.json"
     else:
@@ -660,14 +656,17 @@ def write_content_json(paths, args):
                 variant["year"] = str(args.year)
             episode_number = str(args.episode)
             episodes = variant.setdefault("episodes", {})
-            if args.episode_name:
-                previous = episodes.get(episode_number)
-                if isinstance(previous, dict):
-                    episodes[episode_number] = {**previous, "name": args.episode_name}
-                else:
-                    episodes[episode_number] = args.episode_name
-            else:
-                episodes.setdefault(episode_number, f"Episode {episode_number}")
+            previous = episodes.get(episode_number)
+            name = args.episode_name or (
+                previous.get("name") if isinstance(previous, dict) else previous
+            ) or f"Episode {episode_number}"
+            episode = dict(previous) if isinstance(previous, dict) else {}
+            episode.update(
+                name=name,
+                original=paths["original"].relative_to(paths["root"].parent).as_posix(),
+                master=paths["master"].relative_to(paths["root"].parent).as_posix(),
+            )
+            episodes[episode_number] = episode
             container["rating"] = highest_rating(
                 container.get("rating"),
                 *(item.get("rating") for item in container.get("languages", {}).values()),
@@ -678,11 +677,19 @@ def write_content_json(paths, args):
                 *(item.get("rating") for item in content_data.get("languages", {}).values()),
             )
         else:
-            content_data["rating"] = args.rating
+            version = (content_data.setdefault("languages", {}).setdefault(
+                language, {"language": language}) if language else content_data)
+            version["rating"] = args.rating
+            version["original"] = paths["original"].relative_to(paths["root"].parent).as_posix()
+            version["master"] = paths["master"].relative_to(paths["root"].parent).as_posix()
             if args.movie_name:
                 content_data["name"] = args.movie_name
             if args.year:
                 content_data["year"] = str(args.year)
+            content_data["rating"] = highest_rating(
+                content_data.get("rating"), args.rating,
+                *(item.get("rating") for item in content_data.get("languages", {}).values())
+            )
 
         descriptor, temporary = tempfile.mkstemp(prefix=".metadata-", suffix=".tmp", dir=paths["root"])
         try:
@@ -771,7 +778,18 @@ def build_rendition_command(
 
         "-map",
         "0:v:0",
-        "-an",
+        "-map",
+        "0:a:0",
+        "-c:a",
+        "aac",
+        "-profile:a",
+        "aac_low",
+        "-ar",
+        "48000",
+        "-ac",
+        str(rendition["audio_channels"]),
+        "-b:a",
+        str(rendition["audio_bitrate"]),
 
         "-c:v",
         "libx264",
@@ -1133,7 +1151,7 @@ def main(path, args):
                 f', maxrate={rendition["maxrate"] / 1000:.0f}k'
                 f', bufsize={rendition["bufsize"] / 1000:.0f}k'
             )
-        description += f", {len(reader.audio_tracks)} separate audio track(s)"
+        description += ", one muxed audio track"
         print(description)
     copy_original(
         path,
@@ -1146,7 +1164,8 @@ def main(path, args):
         paths,
         args,
     )
-    audio_groups = encode_audio_renditions(path, reader.audio_tracks, encoded_renditions, paths, args)
+    # Exactly one audio source, muxed into each HLS video quality.
+    audio_groups = {}
     duration = get_media_duration(path)
 
     subtitles = extract_subtitles(
@@ -1302,15 +1321,13 @@ if __name__ == "__main__":
     parser.add_argument("--season", type=int)
     parser.add_argument(
         "--language", type=normalize_language, default=None,
-        help="Show/anime version and directory name, e.g. japanese or english. Omit for the legacy layout.",
+        help="Source language/version for movies, OVA, shows and anime. Omit for legacy layout.",
     )
     for kind in ("audio", "subtitle"):
         parser.add_argument(f"--{kind}-language", action="append", default=[], metavar="INDEX=TAG",
                             help="Override a zero-based track language; repeat for more tracks. Does not translate audio/text.")
         parser.add_argument(f"--{kind}-title", action="append", default=[], metavar="INDEX=TITLE",
                             help="Override a zero-based track display title; Unicode names are supported.")
-    parser.add_argument("--default-audio", type=int, default=None, metavar="INDEX",
-                        help="Zero-based audio track to play by default.")
     parser.add_argument("--skip-unsupported-subtitles", action="store_true",
                         help="Explicitly omit image/specialist subtitle formats from HLS; originals remain intact.")
     parser.add_argument("--mediainfo-path", "-MIP", type=str, default=None)
