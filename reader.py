@@ -265,8 +265,13 @@ class Reader:
                 f"Found {len(video_tracks)} video tracks."
             )
 
-        if not video_tracks:
-            raise ValueError("[ERROR] No video track was found.")
+        if len(video_tracks) != 1 or len(audio_tracks) != 1:
+            raise ValueError(
+                "[ERROR] Lapis requires exactly one video and one audio stream "
+                f"(found {len(video_tracks)} video, {len(audio_tracks)} audio). "
+                "Split/remux multi-audio sources into separate language-specific "
+                "files before rendering."
+            )
                             
         item = video_tracks[0]
         # metrics collecting from json data
