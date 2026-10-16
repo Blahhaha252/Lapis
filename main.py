@@ -473,8 +473,9 @@ def write_master_playlist(renditions, subtitles, paths, audio_groups=None):
             lines.append("#EXT-X-MEDIA:" + ",".join(attrs))
     for rendition in sorted(renditions, key=lambda item: item["height"]):
         audio = audio_groups.get(rendition.get("audio_group"), [])
-        peak = rendition["measured_peak_bitrate"] + (0 if audio else rendition.get("audio_bitrate", 0))
-        average = rendition["measured_average_bitrate"] + (0 if audio else rendition.get("audio_bitrate", 0))
+        # Measured segment bytes already include muxed video + audio.
+        peak = rendition["measured_peak_bitrate"] + max((item["measured_peak_bitrate"] for item in audio), default=0)
+        average = rendition["measured_average_bitrate"] + max((item["measured_average_bitrate"] for item in audio), default=0)
         codec = read_video_codec(rendition)
         codec += ",mp4a.40.2"
         attrs = [f"BANDWIDTH={peak}", f"AVERAGE-BANDWIDTH={average}",
