@@ -168,7 +168,7 @@ class Reader:
         if self.media_probe_path is not None:
             if os.path.exists(self.media_probe_path) and os.path.is_file(self.media_probe_path):
                 bundled = self.media_probe_path
-        binary = str(bundled) if bundled.is_file() else "mediainfo"
+        binary = str(bundled) if bundled else "mediainfo"
         result = subprocess.run(
             [binary, "-f", "--Output=JSON", str(self.media)],
             capture_output=True, text=True, check=True,
