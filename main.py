@@ -361,51 +361,6 @@ def clean_segments(folder, pattern):
         old.unlink()
 
 
-def _legacy_encode_audio_renditions_disabled(source_path, tracks, renditions, paths, args):
-    """Encode every input audio stream; reuse identical settings across qualities."""
-    cache = {}
-    groups = {}
-    for rendition in renditions:
-        if not tracks:
-            continue
-        outputs = []
-        for track in tracks:
-            settings = choose_audio_settings(track["channels"], rendition["height"], rendition["original"])
-            key = (track["index"], settings["channels"], settings["bitrate"])
-            if key not in cache:
-                name = f'track-{key[0]:03d}-{key[1]}ch-{key[2]}'
-                root = paths["hls"] / "audio" / name
-                root.mkdir(parents=True, exist_ok=True)
-                clean_segments(root, "audio-segment-*.ts")
-                playlist = root / "audio-playlist.m3u8"
-                command = ["ffmpeg", "-y", "-copyts", "-start_at_zero", "-i", str(source_path),
-                           "-map", track["stream_selector"], "-vn", "-sn", "-dn",
-                           "-c:a", "aac", "-profile:a", "aac_low", "-ar", "48000",
-                           "-ac", str(settings["channels"]), "-b:a", str(settings["bitrate"]),
-                           "-map_metadata", "-1", "-metadata:s:a:0", f'language={track["language"]}',
-                           "-f", "hls", "-hls_time", "10", "-hls_playlist_type", "vod",
-                           "-hls_list_size", "0", "-hls_segment_type", "mpegts",
-                           *hls_timestamp_options(), "-hls_segment_filename", str(root / "audio-segment-%05d.ts"),
-                           str(playlist)]
-                if args.nice is not None:
-                    command = ["nice", "-n", str(args.nice), *command]
-                print(f'[INFO] Encoding audio {track["index"]}: {get_audio_display_name(track)} ({settings["channels"]} channels)')
-                subprocess.run(command, check=True)
-                output = dict(track, name=name, playlist_path=playlist, rendition_root=root,
-                              output_channels=settings["channels"], output_bitrate=settings["bitrate"])
-                peak, average = calculate_rendition_bitrates(output)
-                output.update(measured_peak_bitrate=peak, measured_average_bitrate=average)
-                cache[key] = output
-            outputs.append(cache[key])
-        group_key = tuple(item["name"] for item in outputs)
-        existing = next((group_id for group_id, members in groups.items()
-                         if tuple(item["name"] for item in members) == group_key), None)
-        group_id = existing or f"audio-{len(groups)}"
-        groups[group_id] = outputs
-        rendition["audio_group"] = group_id
-    return groups
-
-
 def get_audio_display_name(track):
     label = track.get("language_name") or get_language_name(track.get("language", "und"))
     title = track.get("title")
@@ -540,7 +495,12 @@ def is_episode_content(content_type):
 
 
 def normalize_language(value):
-    """Return a safe, lowercase language directory name; no language means legacy."""
+    """Safe language directory slug, preserving named versions like 'english'.
+
+    The bundled langcodes[data] registry (used by reader.py) resolves standard
+    IANA/ISO language tags and names without a hardcoded finite allowlist.
+    Unknown future names remain usable as explicit language-version slugs.
+    """
     if value is None:
         return None
     language = value.strip().lower()
