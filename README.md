@@ -1,388 +1,282 @@
 # Lapis
 
-Lapis is a Python-based media processing pipeline for preparing video content for
-storage and HLS playback. It uses FFmpeg for media processing and MediaInfo as its
-primary source of input stream metadata.
+Lapis prepares downloadable media and HLS streams from video, audio and
+subtitles. Use explicit inputs (`-v`, `-a`, `-s`) to choose tracks yourself, or
+`--input` to discover the tracks inside one existing container.
 
-Lapis supports multilingual media without a fixed language allowlist. Audio and
-subtitle tracks are detected from the source file, preserved where supported, and
-published as selectable HLS tracks.
+FFmpeg handles media processing. **MediaInfo remains the source of input stream
+metadata**, including languages, dimensions, frame rates and channel counts.
+FFprobe is used for duration/segment measurements and generated codec parameters.
 
-## Features
+## Installation
 
-- Multiple audio tracks per source file
-- HLS alternate-audio groups
-- Multiple tracks in the same language
-- Commentary and audio-description tracks
-- Unicode WebVTT subtitles
-- Regional and script language tags such as `pt-BR`, `zh-Hant`, and `zh-Hant-TW`
-- Unlabelled and undetermined-language tracks
-- Track titles from source metadata
-- Per-track language and title overrides
-- Automatic HLS master playlist generation
-- Multiple video qualities with shared audio encodes
-- Video-only input support
-- Movie, show, anime, and OVA content organization
-- Track metadata exported to `hls/tracks.json`
-
-There is no fixed list of supported spoken languages. If a language can be
-represented by the source metadata and processed by the underlying media tools,
-Lapis can retain it.
-
-## Requirements
-
-Lapis requires Python and the following system tools:
-
-- FFmpeg
-- FFprobe
-- MediaInfo
-
-On Ubuntu:
+Python 3.10 or later is required. On Ubuntu:
 
 ```sh
-sudo apt install ffmpeg mediainfo
-```
-
-Install the Python dependencies inside a virtual environment:
-
-```sh
+sudo apt install ffmpeg mediainfo python3-venv
+python3 -m venv venv
+. venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-Lapis uses `mi/mediainfo` when a bundled MediaInfo executable is present.
-Otherwise, it uses `mediainfo` from `PATH`.
+Run `python main.py ...` or `./lapis ...` in that environment.
+`--mediainfo-path /path/to/mediainfo` selects an executable explicitly. Otherwise
+Lapis uses `mi/mediainfo` if present, then `mediainfo` on PATH. An explicit path
+is respected rather than silently falling back if it fails.
 
-The optional `langcodes[data]` dependency provides language-name lookup and
-standard language-tag normalization. Tracks continue to work without the language
-database, but their labels may use language codes instead of human-readable
-language names.
+The default output directory comes from `./config.yml`:
 
-## Media metadata
-
-MediaInfo is the authoritative metadata source for input video, audio, and
-subtitle streams.
-
-Lapis uses MediaInfo metadata including:
-
-- Language
-- Track title
-- Channel count
-- Sample rate
-- Bitrate
-- Track flags
-
-FFprobe is not used to determine input language tags or dispositions. It remains
-in use for duration and segment measurements and for inspecting generated H.264
-codec parameters.
-
-FFmpeg performs the actual media encoding and conversion.
-
-Input tracks are associated with FFmpeg using their per-type ordinal:
-
-```text
-0:a:0
-0:a:1
-0:s:0
-0:s:1
+```yaml
+output: /path/to/cdn
 ```
 
-MediaInfo `ID` and `StreamOrder` values are retained for diagnostic purposes but
-are not assumed to correspond to FFmpeg stream indices.
+Use `--config /path/to/config.yml` for another configuration, or
+`--output /path/to/cdn` to override it without loading a configuration file.
 
-## Audio tracks
-
-All input audio tracks are retained as selectable HLS alternate audio.
-
-This includes sources containing:
-
-- Multiple languages
-- Multiple tracks in one language
-- Commentary tracks
-- Audio-description tracks
-- Different mixes or dubbing releases
-
-Missing or unusable language metadata is represented as:
-
-```text
-und
-```
-
-for an undetermined language.
-
-`zxx`, representing no linguistic content, is also retained.
-
-Language tags are not restricted to a hardcoded list. Regional, script, rare, and
-private-use tags can be retained.
-
-Examples include:
-
-```text
-en
-ja
-ru
-pt-BR
-zh-Hant
-zh-Hant-TW
-```
-
-Unknown tags fall back to their language-code representation when a friendly
-language name cannot be resolved.
-
-Each HLS video quality references an alternate-audio group. Identical audio
-encodes can be shared between video qualities rather than encoded separately for
-each quality.
-
-More source audio tracks therefore require additional encoding time and storage,
-but not necessarily one duplicate encode per video quality.
-
-Video-only sources are also supported and do not advertise nonexistent audio
-tracks.
-
-## Subtitles
-
-Supported text subtitle streams are converted to Unicode WebVTT and published as
-HLS subtitle tracks.
-
-Subtitle tracks do not require language metadata. Unlabelled tracks are retained,
-and duplicate display names are disambiguated.
-
-Bitmap subtitle formats such as PGS and DVD subtitles cannot be directly
-converted to WebVTT.
-
-By default, an unsupported subtitle conversion produces an explanatory error
-rather than silently discarding the stream.
-
-Unsupported subtitles can explicitly be omitted from HLS output with:
-
-```sh
---skip-unsupported-subtitles
-```
-
-The copied original media file still retains those streams.
-
-Lapis targets standalone subtitle streams. Embedded closed-caption services may
-need to be extracted into separate subtitle tracks before processing.
-
-WebVTT conversion cannot preserve every advanced ASS/SSA feature, including some
-typography, positioning, and karaoke effects.
-
-## Track metadata
-
-Detected track information and generated output locations are written to:
-
-```text
-hls/tracks.json
-```
-
-This provides a machine-readable description of the input tracks and the HLS
-assets generated from them.
-
-## Content language versions
-
-For shows and anime, `--language` identifies the language/version of the source
-video and its directory layout.
-
-It does **not** define the language of every audio or subtitle stream inside the
-file.
-
-For example:
+## One video with several audio and subtitle inputs
 
 ```sh
 python main.py \
-  --input episode.mkv \
-  --content-type anime \
-  --imdb tt1234567 \
-  --season 1 \
-  --episode 1 \
-  --rating TV-PG \
-  --language japanese
+  -v video.mkv \
+  -a audio.m4a -al english \
+  -a audio.aac -al spanish \
+  -s subtitle.vtt -sl english \
+  -s subtitle2.vtt -sl spanish \
+  --content-type movie --imdb tt1234567 --rating PG \
+  --movie-name 'Example movie' --output ./cdn
 ```
 
-produces the existing layout:
+With one video and no joins, all declared audio and subtitle inputs are included
+in one downloadable MKV and one HLS master with selectable tracks.
 
-```text
-<output>/tt1234567/s1/japanese/e1.mkv
-<output>/tt1234567/s1/hls/japanese/e1/master.m3u8
-```
+Each input selects stream **0 of its requested type** by default. Explicit
+`-v video.mkv` selects video only; it does not also import embedded audio or
+subtitles. Supply the same file with `-a` or `-s` to select those streams. Without
+any `-a` inputs, the output is video-only.
 
-`--language` accepts a safe ASCII name or language-code slug and has no language
-allowlist.
+`-al` labels the most recent `-a`; `-sl` labels the most recent `-s`. Names such as
+`english`, `spanish`, `japanese` and `日本語` resolve through `langcodes[data]`.
+Language tags such as `en`, `ja`, `yue`, `pt-BR`, `zh-Hant` and `x-custom` have no
+fixed allowlist. For ambiguous names, use a tag. Omit the label to retain
+MediaInfo's language metadata, or `und` when missing. Labels do not translate
+speech or text, and filenames are never used to guess the spoken language.
 
-For native-script display names, use a language code for the directory and retain
-the native name in the media track title.
+AAC normally has the `.aac` extension. Files named `.acc` are also accepted if
+FFmpeg recognizes their actual contents; no extension allowlist is imposed.
 
-Separate source video versions remain separate entries. For example, the same
-episode can be processed once using:
+## Couple inputs into separate versions
 
-```sh
---language japanese
-```
+Indices start at zero independently for each input type:
 
-and again using:
+| Reference | Selected input |
+| --- | --- |
+| `0:v` | First `-v` |
+| `1:v` | Second `-v` |
+| `0:a` | First `-a` |
+| `1:a` | Second `-a` |
+| `0:s` | First `-s` |
 
-```sh
---language english
-```
-
-Both versions remain represented in the episode metadata.
-
-Movie and OVA language variants remain outside this directory convention, but
-multilingual audio and subtitle tracks are supported for those content types.
-
-## Correcting track metadata
-
-Incorrect or missing embedded language metadata can be overridden from the
-command line.
-
-Track indices are zero-based within their own stream type. Audio and subtitle
-indices are therefore independent.
-
-Example:
+These are Lapis references, not FFmpeg's combined input indices.
 
 ```sh
 python main.py \
-  --input episode.mkv \
-  --content-type anime \
-  --imdb tt1234567 \
-  --season 1 \
-  --episode 1 \
-  --rating TV-PG \
-  --language japanese \
-  --audio-language 0=ja \
-  --audio-language 1=yue \
-  --audio-language 2=pt-BR \
-  --audio-title '1=粵語' \
-  --default-audio 0 \
-  --subtitle-language 0=zh-Hant \
-  --subtitle-title '0=繁體中文'
+  -v english-video.mkv -v japanese-video.mkv \
+  -a english.m4a -al english \
+  -a japanese.aac -al japanese \
+  -s english.vtt -sl english \
+  -s japanese.vtt -sl japanese \
+  -join 0:v 0:a 0:s -jl english \
+  --join 1:v 1:a 1:s -jl japanese \
+  --content-type anime --imdb tt1234567 --rating TV-PG \
+  --season 1 --episode 1 --show-name 'Example show' \
+  --episode-name 'First episode' --output ./cdn
 ```
 
-The relevant options can be repeated for additional tracks.
+`-join` and `--join` are aliases. Each join couples exactly one video with zero
+or more audio inputs. For alternate audio within one version, use e.g.
+`-join 0:v 0:a 1:a -jl japanese`. Inputs may be reused across joins.
+Joins combine tracks on one timeline; they do not concatenate videos.
 
-Use language tags with the language options and free-form or native-script names
-with the title options.
+`-jl`, `--join-language` and `--join-lang` label the preceding join's output
+folder/version. Multiple videos require explicit joins. Multiple joins require
+distinct labels to prevent output collisions.
 
-Without `--default-audio`, Lapis selects the first source audio track marked as
-default. If no audio track is marked default, the first audio track is used.
+**Subtitles are shared unless a join explicitly selects a subset.** For example,
+`-join 0:v 0:a` includes all declared `-s` inputs, while
+`-join 0:v 0:a 1:s` includes only the second subtitle. Audio is never implicitly
+added to an explicit join. Unreferenced audio/video declarations are not used.
 
-Only one audio track is advertised as the default for an HLS audio group. All
-other tracks remain manually selectable.
+Input paths and references are validated before processing. All selected stream
+indices and subtitle support are checked before the first join is written.
+Missing files, nonexistent streams, malformed/duplicate references and duplicate
+version folders produce errors instead of silently choosing another track.
 
-## HLS player compatibility
+## Preview the selection
 
-Applications should load:
+Add `--dry-run` to either mode:
 
-```text
-master.m3u8
+```sh
+python main.py -v video.mkv -a english.m4a -al english \
+  -join 0:v 0:a -jl english \
+  --content-type movie --imdb tt1234567 --rating PG \
+  --output ./cdn --dry-run > plan.json
 ```
 
-rather than an individual quality playlist.
+The JSON includes selected inputs, languages, stream indices, output paths and
+mux commands. MediaInfo probes the selected sources, but no output directories
+or media are created. Warnings use stderr so stdout stays valid JSON. A dry run
+cannot guarantee encoder/muxer support for every codec; FFmpeg checks that when
+processing runs.
 
-Quality playlists contain video, while the HLS master playlist associates them
-with their alternate audio and subtitle groups.
+## Pick a stream inside a container
 
-The player must therefore support HLS alternate audio.
-
-For hls.js-based applications, audio tracks are available through the
-`audioTracks` list and can be selected through `audioTrack`.
-
-The language/version selector used by `watch.btube3.com` is separate from the
-audio-track selector. A video can therefore have both:
-
-```text
-Japanese video version
-├── Japanese audio
-├── English audio
-└── Commentary
-
-English video version
-├── English audio
-└── Commentary
+```sh
+python main.py \
+  -v episode.mkv --video-stream 0 \
+  -a episode.mkv --audio-stream 1 -al japanese \
+  -a episode.mkv --audio-stream 2 -al english \
+  -s episode.mkv --subtitle-stream 0 -sl english \
+  --content-type show --imdb tt1234567 --rating TV-PG \
+  --season 1 --episode 2 --language japanese
 ```
 
-Player applications must provide their own audio-selection UI if alternate audio
-tracks should be exposed to users.
-
-Lapis generates the media and playlists; it does not modify player-side
-JavaScript.
+`--video-stream`, `--audio-stream` and `--subtitle-stream` modify the preceding
+input of the corresponding type. Indices are zero-based within that stream type
+inside the file. In this example, join reference `0:a` still means the first
+`-a`, even though it selects the container's second audio stream.
 
 ## Timing
 
-Separate audio and video encodes preserve the source timeline.
+Inputs must correspond to the same edit. Lapis does not detect dub alignment,
+remove different openings, stretch audio, or synchronize recordings by content.
+Each distinct input is shifted from its container start time. Relative stream
+offsets within a shared container are retained. Remuxing can change timestamp
+precision and how codec priming is represented.
 
-Lapis uses the same one-second MPEG-TS timestamp offset for generated streams,
-with a corresponding WebVTT timestamp map.
-
-Audio encoder priming is retained instead of independently resetting each
-track's presentation timestamps.
-
-Existing source audio/video synchronization offsets are preserved and are not
-automatically corrected.
-
-## Publishing
-
-The HLS master playlist is replaced after successful stream encoding.
-
-Media assets are written into their configured output directories. When replacing
-content that is currently being served to users, rendering into an offline or
-staging output tree is recommended.
-
-Changes to the audio layout require existing content to be rendered again.
-Replacing the Lapis scripts alone does not alter previously generated output.
-
-## Limitations
-
-Lapis preserves and processes language metadata already associated with the
-source media.
-
-It does **not**:
-
-- Translate audio or subtitles
-- Transcribe speech
-- Detect the spoken language of unlabelled audio
-- Generate missing language tracks
-- Preserve every advanced ASS/SSA styling feature
-- Convert bitmap subtitles such as PGS/DVD subtitles directly to WebVTT
-
-Input codecs must also be supported by the installed FFmpeg build.
-
-## Testing
-
-Install the test dependencies:
+To adjust a track, use an offset after its input:
 
 ```sh
-python -m pip install pytest m3u8 pymediainfo
+-v video.mkv \
+-a audio.m4a -al english --audio-offset 0.250 \
+-s subtitle.vtt -sl english --subtitle-offset -0.100
 ```
 
-Run the test suite:
+Positive values delay the preceding input; negative values advance it. Material
+moved before the start may not be playable. Inspect the result after adjusting
+timing. Lapis does not use `-shortest` to silently truncate a video to an audio
+track's length.
+
+Selected streams are first stream-copied into one MKV. HLS processing then uses
+that common timeline with the existing shared one-second MPEG-TS timestamp
+offset and corresponding WebVTT timestamp map.
+
+## Language folders and metadata
+
+`--language english` sets the version folder for a single output. Each `-jl`
+overrides it for its join. Directory names are safe ASCII names/codes; track
+labels such as `-al 日本語` are separate. Use `ja` or `japanese` for that folder.
+
+Explicit mode produces an MKV containing the selected streams, without a
+`raw_files` directory:
+
+| Content | Download | HLS master |
+| --- | --- | --- |
+| Movie/OVA | `<imdb>/<language>/<imdb>.mkv` | `<imdb>/hls/<language>/master.m3u8` |
+| Show/anime with season | `<imdb>/s1/<language>/e1.mkv` | `<imdb>/s1/hls/<language>/e1/master.m3u8` |
+| Show/anime without season | `<imdb>/<language>/e1.mkv` | `<imdb>/hls/<language>/e1/master.m3u8` |
+
+Omitting a language keeps the unlabelled layout. Legacy `--input` copies the
+original container with its original extension.
+
+One `<content-type>.json` describes all versions. Episodes are stored under
+`seasons[season].languages[language].episodes`, or top-level
+`languages[language].episodes` without seasons. Episode entries contain `name`,
+`master`, and `download`. Movie/OVA versions live in top-level `languages` and
+contain `master` and `download` directly. Paths are relative to the CDN root.
+Other episodes, seasons and versions are retained. JSON updates are locked and
+atomically replaced.
+
+An existing single rating-suffixed movie/OVA index, such as `movie-kids.json`, is
+read on upgrade when `movie.json` is absent. Multiple legacy indices must be
+merged explicitly; old files are not deleted. Update any `global.json` entries
+that reference a rating-suffixed filename to the canonical filename. Verify that
+your player supports object-valued episodes and movie language variants before
+publishing the new index.
+
+Each HLS directory contains `tracks.json` with selected track metadata and
+published track paths. Source filenames and indices are recorded without
+exposing absolute local source directories.
+
+## Existing scripts and overrides
+
+Legacy automatic discovery remains available:
 
 ```sh
+python main.py --input episode.mkv \
+  --content-type anime --imdb tt1234567 --rating TV-PG \
+  --season 1 --episode 1 --language japanese
+```
+
+Do not mix `--input` with `-v`/`-a`/`-s`. An explicit input is now required; there
+is no implicit `./test.mkv` fallback.
+
+Older overrides remain supported:
+
+```sh
+--audio-language 0=en --audio-title '0=English dub' \
+--audio-language 1=ja --default-audio 1 \
+--subtitle-language 0=en --subtitle-title '0=English SDH'
+```
+
+These indices refer to output track order and apply to **each** join. Prefer
+`-al`/`-sl` when joins select different tracks. Output overrides take precedence
+over input labels. `--default-audio` chooses one selected audio track; otherwise
+the first default-marked track is used, then the first selected track.
+
+Quality, frame-rate, CRF, cover, nice, title, rating and year options remain
+available with `--help`. Global technical video overrides apply to every video.
+
+## Playback and limitations
+
+HLS qualities are video-only; the master associates them with AAC audio groups
+and WebVTT subtitles. Players need alternate-audio support and selection UI.
+Audio encodes with identical settings are reused across qualities of one
+version. Different joins are independent encoding jobs.
+
+Text subtitles are converted to WebVTT; advanced ASS/SSA styling and font
+attachments are not preserved. Bitmap PGS/DVD subtitles require OCR or a
+specialist converter. They fail preflight by default;
+`--skip-unsupported-subtitles` retains the selected stream in the MKV but omits
+it from HLS. Embedded captions may need separate extraction.
+
+Input codecs must be supported by FFmpeg and by Matroska for the stream-copy
+MKV. Unselected attachments/data streams are not imported. No language
+translation, transcription or speech-language recognition is performed.
+
+Downloads are replaced only after muxing succeeds. The temporary MKV is written
+in its destination directory to avoid a second full media copy. Ordinary
+failures and Ctrl+C clean it up; a hard kill/power loss may leave a hidden
+`.lapis-join-*.mkv` for manual cleanup. Selected input files cannot be overwritten
+by an explicit-mode output and are never deleted.
+
+The master playlist follows successful encoding, and content JSON follows media
+and cover work. The entire HLS directory is not transactional: use a staging
+`--output` when replacing live content. If a later join fails, earlier successful
+joins remain published. Several versions require additional time and storage.
+
+## Tests
+
+```sh
+python -m pip install -r requirements-dev.txt
 python -m pytest -q tests
 ```
 
-The test suite covers:
+Tests cover argument binding, independent indices, invalid joins, language names
+and tags, content layouts, metadata preservation, mux failure cleanup, real
+MKV/HLS output, stream selection, audio/subtitles, copied video packet hashes,
+positive audio offsets, default audio, multiple qualities, fractional frame
+rates, visible dimensions and legacy discovery.
 
-- Real FFmpeg output
-- Multiple audio tracks
-- Multiple subtitle tracks
-- Unicode subtitle text
-- Regional and script language tags
-- Unlabelled tracks
-- Multiple video qualities
-- Delayed audio tracks
-- Playlist bitrate measurements
-- Generated H.264 codec declarations
-- Existing episode JSON paths
-- Multiple video-language versions of one episode
-
-MediaInfo metadata can be exercised through the real MediaInfo shared library
-using `pymediainfo` when its CLI is unavailable during testing. Production uses
-the MediaInfo CLI.
-
-FFmpeg encoding and FFprobe output checks are exercised directly.
-
-Browser playback behavior is outside the automated test suite.
-
-## License
-
-See the repository license for usage and redistribution terms.
+Integration tests use FFmpeg and MediaInfo. If the MediaInfo command is absent,
+the adapter invokes the actual MediaInfo shared library from `pymediainfo`.
+Browser playback and full-length production encodes are outside this suite.
