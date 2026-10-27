@@ -1,5 +1,4 @@
 import subprocess
-import os
 import json
 import re
 from pathlib import Path
@@ -163,12 +162,11 @@ class Reader:
         return self.get_track_metadata(track)
 
     def probe_media(self):
-        bundled = None
-
         if self.media_probe_path is not None:
-            if os.path.exists(self.media_probe_path) and os.path.is_file(self.media_probe_path):
-                bundled = self.media_probe_path
-        binary = str(bundled) if bundled.is_file() else "mediainfo"
+            binary = str(self.media_probe_path)
+        else:
+            bundled = Path(__file__).resolve().parent / "mi" / "mediainfo"
+            binary = str(bundled) if bundled.is_file() else "mediainfo"
         result = subprocess.run(
             [binary, "-f", "--Output=JSON", str(self.media)],
             capture_output=True, text=True, check=True,
@@ -232,13 +230,14 @@ class Reader:
             self.audio_bitrate_mode = first["bitrate_mode"]
             self.audio_bitrate_per_channel = self.audio_bitrate / self.audio_channels if self.audio_bitrate else None
 
-    def read(self, args):
+    def read(self, args, data=None):
         # filtering paths and such
         if not self.exists:
             raise ValueError("[ERROR] Media does not appear to exist")
         if not self.is_file:
             raise ValueError("[ERROR] Currently not supporting a folder of contents")
-        data = self.probe_media()
+        if data is None:
+            data = self.probe_media()
         if not data['media']['track']:
             raise ValueError(f"Expected 'media' inside of mediainfo output of {self.media}")
         tracks = data["media"]["track"]
@@ -311,12 +310,13 @@ class Reader:
             if (stored_w or width or sampled_w) and not args.suppress_warning:
                 print("[WARNING] Video width was provided even though the media already exposes it. Using the provided value.")
             self.video_width = int(args.width)
-        elif stored_w:
-            self.video_width = int(stored_w)
-        elif sampled_w:
-            self.video_width = int(sampled_w)
+        # Prefer visible dimensions over codec block padding in Stored_*.
         elif width:
             self.video_width = int(width)
+        elif sampled_w:
+            self.video_width = int(sampled_w)
+        elif stored_w:
+            self.video_width = int(stored_w)
         else:
             raise ValueError("[ERROR] width, stored width, and sampled width was not found. Please pass it in")
         
@@ -324,12 +324,13 @@ class Reader:
             if (stored_h or height or sampled_h) and not args.suppress_warning:
                  print("[WARNING] Video  was provided even though the media already exposes it. Using the provided value.")
             self.video_height = int(args.height)
-        elif stored_h:
-            self.video_height = int(stored_h)
-        elif sampled_h:
-            self.video_height = int(sampled_h)
+        # Prefer visible dimensions over codec block padding in Stored_*.
         elif height:
             self.video_height = int(height)
+        elif sampled_h:
+            self.video_height = int(sampled_h)
+        elif stored_h:
+            self.video_height = int(stored_h)
         else:
             raise ValueError("[ERROR] height, stored height, and sampled height was not found. Please pass it in")
         
@@ -377,5 +378,8 @@ class Reader:
         else:
             raise ValueError("[ERROR] FPS information was not found")
 
+        if min(self.video_width, self.video_height, self.fps_num, self.fps_den) <= 0:
+            raise ValueError("Video dimensions and frame-rate numerator/denominator must be positive.")
         self.fps = self.fps_num / self.fps_den
         self.read_streams(tracks)
+
