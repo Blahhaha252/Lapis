@@ -49,6 +49,64 @@ python main.py \
 With one video and no joins, all declared audio and subtitle inputs are included
 in one downloadable MKV and one HLS master with selectable tracks.
 
+## Separate HLS playlists
+
+HLS is always packaged as separate video, audio and subtitle playlists. Each
+playlist is encoded directly from its selected source file and stream; HLS
+does not read back the combined MKV. Add `--hls-only` to skip creating that
+download altogether:
+
+```sh
+python main.py \
+  -v video.mkv \
+  -a english.m4a -al english \
+  -a spanish.aac -al spanish \
+  -s english.vtt -sl english \
+  -s spanish.vtt -sl spanish \
+  --content-type movie --imdb tt1234567 --rating PG \
+  --language english --output ./cdn --hls-only
+```
+
+The player opens `tt1234567/hls/english/master.m3u8`. Paths underneath that
+directory are:
+
+| Output | Contents |
+| --- | --- |
+| `master.m3u8` | Links the video qualities and selectable audio/subtitle groups |
+| `video/<quality>/<quality>-playlist.m3u8` | Video-only H.264 segments |
+| `audio/track-<index>-<channels>ch-<bitrate>/audio-playlist.m3u8` | One audio track's AAC segments |
+| `vtt/subtitle-<index>-playlist.m3u8` | One subtitle track's WebVTT file |
+| `tracks.json` | Track metadata and relative playlist paths, including video renditions |
+
+Indices in generated names are padded to three digits (`000`, `001`, etc.).
+Video and audio use approximately ten-second MPEG-TS segments. Each subtitle
+playlist references one WebVTT file covering the encoded video's duration,
+including intervals without cues. These are VOD playlists ending in
+`#EXT-X-ENDLIST`.
+
+The master uses `EXT-X-STREAM-INF` for each video quality and `EXT-X-MEDIA`
+for audio and subtitles, connected through `AUDIO` and `SUBTITLES` group IDs.
+No audio is embedded in the video segments. Compatible players can change
+audio language or subtitles while keeping the same video quality.
+
+The same packaging applies to every `-join` and to legacy `--input` mode.
+Each join has its own master: different video edits stay separate so a player
+cannot automatically switch to another edit as if it were a quality change.
+To offer several audio languages with one video, include them in the same join,
+for example `-join 0:v 0:a 1:a -jl english`.
+
+Without `--hls-only`, explicit mode additionally makes the downloadable MKV;
+legacy mode additionally copies its original container. In HLS-only mode,
+content JSON writes `"download": null`. The player should hide its download
+button for this value. An older download file is not deleted, but its stale
+link is cleared when metadata for that version/episode is updated.
+
+Upgrade note: video playlists now live under `video/` inside each HLS tree.
+Master URLs are unchanged. Follow their relative playlist links rather than
+hardcoding the old quality-directory paths; old unused files are not removed.
+
+## Input labels and languages
+
 Each input selects stream **0 of its requested type** by default. Explicit
 `-v video.mkv` selects video only; it does not also import embedded audio or
 subtitles. Supply the same file with `-a` or `-s` to select those streams. Without
@@ -122,9 +180,11 @@ python main.py -v video.mkv -a english.m4a -al english \
   --output ./cdn --dry-run > plan.json
 ```
 
-The JSON includes selected inputs, languages, stream indices, output paths and
-mux commands. MediaInfo probes the selected sources, but no output directories
-or media are created. Warnings use stderr so stdout stays valid JSON. A dry run
+The JSON includes selected inputs, languages, stream indices, output paths,
+direct HLS source options and mux commands. With `--hls-only`, the download
+path (`paths.original`) and `mux_command` are both null. MediaInfo probes the
+selected sources, but no output directories or media are created. Warnings use
+stderr so stdout stays valid JSON. A dry run
 cannot guarantee encoder/muxer support for every codec; FFmpeg checks that when
 processing runs.
 
@@ -166,9 +226,13 @@ moved before the start may not be playable. Inspect the result after adjusting
 timing. Lapis does not use `-shortest` to silently truncate a video to an audio
 track's length.
 
-Selected streams are first stream-copied into one MKV. HLS processing then uses
-that common timeline with the existing shared one-second MPEG-TS timestamp
-offset and corresponding WebVTT timestamp map.
+Each HLS stream is encoded directly from its input using the same container
+start-time rule and explicit track offset. Video/audio share a one-second
+MPEG-TS timestamp offset; WebVTT uses the matching timestamp map. Constant-rate
+video may round timestamps to its frame interval, and AAC encoder priming adds
+a short initial packet. This does not establish content alignment between
+unrelated source files. The optional downloadable MKV is a separate stream-copy
+output, not an intermediate used to build the HLS playlists.
 
 ## Language folders and metadata
 
@@ -176,7 +240,7 @@ offset and corresponding WebVTT timestamp map.
 overrides it for its join. Directory names are safe ASCII names/codes; track
 labels such as `-al 日本語` are separate. Use `ja` or `japanese` for that folder.
 
-Explicit mode produces an MKV containing the selected streams, without a
+By default, explicit mode produces an MKV containing the selected streams, without a
 `raw_files` directory:
 
 | Content | Download | HLS master |
@@ -203,8 +267,9 @@ that reference a rating-suffixed filename to the canonical filename. Verify that
 your player supports object-valued episodes and movie language variants before
 publishing the new index.
 
-Each HLS directory contains `tracks.json` with selected track metadata and
-published track paths. Source filenames and indices are recorded without
+Each HLS directory contains `tracks.json` with selected track metadata,
+`video_renditions`, `audio_groups`, and `published_subtitles`. Every published
+playlist path is relative to that HLS directory. Source filenames and indices are recorded without
 exposing absolute local source directories.
 
 ## Existing scripts and overrides
@@ -246,11 +311,13 @@ version. Different joins are independent encoding jobs.
 Text subtitles are converted to WebVTT; advanced ASS/SSA styling and font
 attachments are not preserved. Bitmap PGS/DVD subtitles require OCR or a
 specialist converter. They fail preflight by default;
-`--skip-unsupported-subtitles` retains the selected stream in the MKV but omits
-it from HLS. Embedded captions may need separate extraction.
+`--skip-unsupported-subtitles` omits them from HLS and retains the selected
+stream in the download if a download is being created. Embedded captions may
+need separate extraction.
 
-Input codecs must be supported by FFmpeg and by Matroska for the stream-copy
-MKV. Unselected attachments/data streams are not imported. No language
+Input codecs must be supported by FFmpeg. Without `--hls-only`, explicit-mode
+inputs must also be supported by Matroska for the stream-copy download.
+Unselected attachments/data streams are not imported. No language
 translation, transcription or speech-language recognition is performed.
 
 Downloads are replaced only after muxing succeeds. The temporary MKV is written
@@ -275,7 +342,10 @@ Tests cover argument binding, independent indices, invalid joins, language names
 and tags, content layouts, metadata preservation, mux failure cleanup, real
 MKV/HLS output, stream selection, audio/subtitles, copied video packet hashes,
 positive audio offsets, default audio, multiple qualities, fractional frame
-rates, visible dimensions and legacy discovery.
+rates, visible dimensions and legacy discovery. Separate-HLS checks cover
+HLS-only output, stream purity, actual selected video/audio content, subtitle
+offsets, nonzero container timestamps, segment boundaries, isolated joins,
+dry runs, metadata paths and retaining old download files.
 
 Integration tests use FFmpeg and MediaInfo. If the MediaInfo command is absent,
 the adapter invokes the actual MediaInfo shared library from `pymediainfo`.

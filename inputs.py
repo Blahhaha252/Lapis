@@ -40,6 +40,19 @@ class Plan:
         return [self.video, *self.audio, *self.subtitles]
 
 
+def hls_input(source, kind, stream=0):
+    """Use the selected source directly, retaining its container timeline."""
+    if not isinstance(source, InputFile):
+        source = InputFile(str(source), kind, 0, stream=stream)
+    if source.kind != kind:
+        raise ValueError(f"Expected a {kind} input, got {source.kind}")
+    options = ["-copyts", "-start_at_zero"]
+    if source.offset:
+        options += ["-itsoffset", str(source.offset)]
+    options += ["-i", str(Path(source.path).resolve())]
+    return options, f"0:{kind}:{source.stream}"
+
+
 class AddInput(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         items = list(getattr(namespace, self.dest, None) or [])

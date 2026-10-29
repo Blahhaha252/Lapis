@@ -14,7 +14,10 @@ import yaml
 from pathlib import Path
 from reader import Reader, normalize_track_language, language_display_name
 from PIL import Image
-from inputs import add_input_arguments, build_plans, inspect_plans, mux_original, mux_command, explicit_language
+from inputs import (
+    add_input_arguments, build_plans, inspect_plans, mux_original, mux_command,
+    explicit_language, hls_input,
+)
 AUDIO_BITRATE_PER_CHANNEL = {
     144: 80_000,
     240: 96_000,
@@ -157,6 +160,7 @@ def extract_subtitles(
     paths,
     duration,
     skip_unsupported=False,
+    source_inputs=None,
 ):
     subtitle_outputs = []
 
@@ -168,7 +172,7 @@ def extract_subtitles(
         if subtitle.get("codec") in bitmap_codecs:
             message = f"Subtitle {index} ({subtitle.get('codec')}) needs OCR or a specialist converter before WebVTT export."
             if skip_unsupported:
-                print(f"[WARNING] {message} Explicitly skipped; original file still contains it.")
+                print(f"[WARNING] {message} Explicitly skipped in HLS; source file is unchanged.")
                 continue
             raise ValueError(message + " Use --skip-unsupported-subtitles only if you want to omit it from HLS.")
         subtitle_name = f"subtitle-{index:03d}"
@@ -183,13 +187,15 @@ def extract_subtitles(
             / f"{subtitle_name}-playlist.m3u8"
         )
 
+        source = source_inputs[index] if source_inputs is not None else source_path
+        input_options, selector = hls_input(source, "s", index)
         command = [
             "ffmpeg",
+            "-nostdin",
             "-y",
-            "-i",
-            str(source_path),
+            *input_options,
             "-map",
-            subtitle.get("stream_selector", f"0:s:{index}"),
+            selector,
             "-c:s",
             "webvtt",
             str(vtt_path),
@@ -365,7 +371,7 @@ def clean_segments(folder, pattern):
         old.unlink()
 
 
-def encode_audio_renditions(source_path, tracks, renditions, paths, args):
+def encode_audio_renditions(source_path, tracks, renditions, paths, args, source_inputs=None):
     """Encode every input audio stream; reuse identical settings across qualities."""
     cache = {}
     groups = {}
@@ -382,8 +388,10 @@ def encode_audio_renditions(source_path, tracks, renditions, paths, args):
                 root.mkdir(parents=True, exist_ok=True)
                 clean_segments(root, "audio-segment-*.ts")
                 playlist = root / "audio-playlist.m3u8"
-                command = ["ffmpeg", "-y", "-copyts", "-start_at_zero", "-i", str(source_path),
-                           "-map", track["stream_selector"], "-vn", "-sn", "-dn",
+                source = source_inputs[track["index"]] if source_inputs is not None else source_path
+                input_options, selector = hls_input(source, "a", track["index"])
+                command = ["ffmpeg", "-nostdin", "-y", *input_options,
+                           "-map", selector, "-vn", "-sn", "-dn",
                            "-c:a", "aac", "-profile:a", "aac_low", "-ar", "48000",
                            "-ac", str(settings["channels"]), "-b:a", str(settings["bitrate"]),
                            "-map_metadata", "-1", "-metadata:s:a:0", f'language={track["language"]}',
@@ -460,11 +468,13 @@ def read_video_codec(rendition):
     return "avc1." + match.group(1).hex()
 
 
-def write_tracks_metadata(reader, audio_groups, subtitles, paths):
+def write_tracks_metadata(reader, audio_groups, subtitles, paths, renditions):
     def plain(track):
         return {key: relative_hls_path(value, paths["hls"]) if isinstance(value, Path) else value
                 for key, value in track.items() if key != "rendition_root"}
-    data = {"version": 1, "audio": reader.audio_tracks, "subtitles": reader.subtitle_tracks,
+    data = {"version": 1, "packaging": "separate-hls", "master_playlist": "master.m3u8",
+            "video_renditions": [plain(item) for item in renditions],
+            "audio": reader.audio_tracks, "subtitles": reader.subtitle_tracks,
             "audio_groups": {key: [plain(item) for item in members] for key, members in audio_groups.items()},
             "published_subtitles": [plain(track) for track in subtitles], "timestamp_offset_seconds": 1}
     paths["hls"].joinpath("tracks.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -596,7 +606,10 @@ def build_output_paths(source_path, args, create=True):
         "master": hls_root / "master.m3u8",
     }
     if create:
-        for directory in (original_path.parent, hls_root, paths["vtt"]):
+        directories = [hls_root, paths["vtt"]]
+        if not getattr(args, "hls_only", False):
+            directories.append(original_path.parent)
+        for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
     return paths
 
@@ -663,7 +676,8 @@ def write_content_json(paths, args):
         content_data["type"] = args.content_type
         media_fields = {
             "master": paths["master"].relative_to(paths["root"].parent).as_posix(),
-            "download": paths["original"].relative_to(paths["root"].parent).as_posix(),
+            "download": None if getattr(args, "hls_only", False) else
+                        paths["original"].relative_to(paths["root"].parent).as_posix(),
         }
 
         if episodic:
@@ -791,17 +805,14 @@ def build_rendition_command(
             str(args.nice),
         ])
 
+    input_options, selector = hls_input(source_path, "v")
     command.extend([
         "ffmpeg",
+        "-nostdin",
         "-y",
-
-        "-copyts",
-        "-start_at_zero",
-        "-i",
-        str(source_path),
-
+        *input_options,
         "-map",
-        "0:v:0",
+        selector,
         "-an",
 
         "-c:v",
@@ -897,7 +908,7 @@ def encode_renditions(source_path, renditions, paths, args):
 
     for rendition in renditions:
         directory_name = rendition_directory_name(rendition)
-        rendition_root = paths["hls"] / directory_name
+        rendition_root = paths["hls"] / "video" / directory_name
 
         rendition_root.mkdir(
             parents=True,
@@ -1038,8 +1049,18 @@ def scaled_width(source_width, source_height, target_height):
     return width
 
 
-def main(path, args, reader=None):
-    paths = build_output_paths(path, args)
+def video_playlist_duration(playlist_path):
+    """Cover the actual encoded video timeline with each subtitle playlist."""
+    durations = [float(line.split(":", 1)[1].split(",", 1)[0])
+                 for line in Path(playlist_path).read_text(encoding="utf-8").splitlines()
+                 if line.startswith("#EXTINF:")]
+    if not durations or any(not math.isfinite(value) or value <= 0 for value in durations):
+        raise ValueError(f"Invalid video playlist duration: {playlist_path}")
+    return sum(durations)
+
+
+def main(path, args, reader=None, plan=None):
+    paths = build_output_paths("joined.mkv" if plan is not None else path, args)
     qualities = [2160, 1440, 1080, 720, 480, 360, 240, 144]
 
     if reader is None:
@@ -1166,19 +1187,20 @@ def main(path, args, reader=None):
             )
         description += f", {len(reader.audio_tracks)} separate audio track(s)"
         print(description)
-    copy_original(
-        path,
-        paths["original"],
-    )
+    if plan is None and not getattr(args, "hls_only", False):
+        copy_original(path, paths["original"])
 
     encoded_renditions = encode_renditions(
-        path,
+        plan.video if plan is not None else path,
         renditions,
         paths,
         args,
     )
-    audio_groups = encode_audio_renditions(path, reader.audio_tracks, encoded_renditions, paths, args)
-    duration = get_media_duration(path)
+    audio_groups = encode_audio_renditions(
+        path, reader.audio_tracks, encoded_renditions, paths, args,
+        source_inputs=plan.audio if plan is not None else None,
+    )
+    duration = video_playlist_duration(encoded_renditions[0]["playlist_path"])
 
     subtitles = extract_subtitles(
         path,
@@ -1186,6 +1208,7 @@ def main(path, args, reader=None):
         paths,
         duration,
         skip_unsupported=getattr(args, "skip_unsupported_subtitles", False),
+        source_inputs=plan.subtitles if plan is not None else None,
     )
 
     measure_renditions(
@@ -1198,7 +1221,7 @@ def main(path, args, reader=None):
         paths,
         audio_groups,
     )
-    write_tracks_metadata(reader, audio_groups, subtitles, paths)
+    write_tracks_metadata(reader, audio_groups, subtitles, paths, encoded_renditions)
     
     if args.cover_art is not None:
         image_exists, image_isfile = check_path(
@@ -1245,6 +1268,8 @@ def create_parser():
     add_input_arguments(parser)
     parser.add_argument("--output", type=Path, help="Output directory; overrides config.yml")
     parser.add_argument("--config", default="config.yml", help="Configuration file (default: ./config.yml)")
+    parser.add_argument("--hls-only", action="store_true",
+                        help="Write separate HLS playlists and metadata without a combined download file")
 
     parser.add_argument(
         "--suppress-warning",
@@ -1355,7 +1380,12 @@ BITMAP_SUBTITLE_CODECS = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "
 def validate_subtitles(tracks, skip_unsupported=False):
     for track in tracks:
         if track.get("codec") in BITMAP_SUBTITLE_CODECS and not skip_unsupported:
-            raise ValueError(f"Subtitle {track['index']} ({track['codec']}) needs OCR or a specialist converter for WebVTT. Use --skip-unsupported-subtitles to retain it only in the MKV.")
+            raise ValueError(f"Subtitle {track['index']} ({track['codec']}) needs OCR or a specialist converter for WebVTT. Use --skip-unsupported-subtitles to omit it from HLS.")
+
+
+def describe_output_paths(paths, args):
+    return {key: None if key == "original" and args.hls_only else str(value)
+            for key, value in paths.items()}
 
 
 def run(args):
@@ -1372,7 +1402,8 @@ def run(args):
         paths = build_output_paths(args.input, args, create=False)
         if args.dry_run:
             print(json.dumps({"mode": "automatic", "source": args.input,
-                              "paths": {key: str(value) for key, value in paths.items()},
+                              "hls_only": args.hls_only,
+                              "paths": describe_output_paths(paths, args),
                               "audio": reader.audio_tracks, "subtitles": reader.subtitle_tracks},
                              ensure_ascii=False, indent=2))
         else:
@@ -1388,27 +1419,33 @@ def run(args):
         apply_track_overrides(reader, job_args)
         validate_subtitles(reader.subtitle_tracks, args.skip_unsupported_subtitles)
         paths = build_output_paths("joined.mkv", job_args, create=False)
-        if paths["original"].resolve() in all_inputs:
+        if not args.hls_only and paths["original"].resolve() in all_inputs:
             raise ValueError(f"Output would replace one of the input files: {paths['original']}; choose another --output directory")
         jobs.append((plan, reader, job_args, paths))
     if args.dry_run:
-        result = {"mode": "explicit", "outputs": []}
+        result = {"mode": "explicit", "hls_only": args.hls_only, "outputs": []}
         for plan, reader, job_args, paths in jobs:
             result["outputs"].append({
                 "language": plan.language,
                 "inputs": [{"reference": f"{item.index}:{item.kind}", "file": item.path,
                             "stream": item.stream, "language": item.language,
                             "offset_seconds": item.offset} for item in plan.inputs],
-                "paths": {key: str(value) for key, value in paths.items()},
+                "paths": describe_output_paths(paths, job_args),
                 "audio": reader.audio_tracks, "subtitles": reader.subtitle_tracks,
-                "mux_command": mux_command(plan, reader, paths["original"], args.nice),
+                "hls_sources": [{"reference": f"{item.index}:{item.kind}",
+                                 "input_options": hls_input(item, item.kind)[0],
+                                 "stream_selector": hls_input(item, item.kind)[1]}
+                                for item in plan.inputs],
+                "mux_command": None if args.hls_only else
+                               mux_command(plan, reader, paths["original"], args.nice),
             })
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
     for plan, reader, job_args, paths in jobs:
-        print(f"[INFO] Preparing {plan.language or 'default'} version: {paths['original']}")
-        mux_original(plan, reader, paths["original"], args.nice)
-        main(paths["original"], job_args, reader)
+        print(f"[INFO] Preparing {plan.language or 'default'} version: {paths['master']}")
+        if not args.hls_only:
+            mux_original(plan, reader, paths["original"], args.nice)
+        main(plan.video.path, job_args, reader, plan)
 
 
 def cli(argv=None):
