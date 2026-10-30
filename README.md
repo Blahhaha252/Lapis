@@ -60,3 +60,23 @@ Requirements: Python 3.10+, ffmpeg, ffprobe, PyYAML, langcodes.
 ```sh
 python -m pip install -r requirements.txt
 ```
+
+## Cover art (title-wide)
+
+Pass `--cover-art poster.jpg` with any movie, show, or anime publication,
+including updates made with `--add` or `--replace`. The image is always
+converted to **PNG**, with `optimize=True` and `compress_level=9`.
+Orientation metadata is applied; images taller than 1080 pixels are resized to
+1080 pixels in height using aspect-ratio-preserving Lanczos resampling.
+Smaller images retain their original dimensions. Transparency is preserved
+where possible. Invalid images are rejected before encoding.
+
+* Movie: `<movie-imdb>/cover_art.png` beside `movie.json`.
+* Show: `show_metadata/<show-imdb>-cover_art.png` beside series JSON.
+* Anime: `anime_metadata/<anime-imdb>-cover_art.png` beside series JSON.
+
+Artwork is **never stored in an episode's IMDb directory** for shows/anime.
+The title metadata includes `cover_art` as a metadata-relative basename;
+the `global.json` registry includes a CDN-root-relative `cover_art` path.
+Subsequent episode uploads without `--cover-art` keep the existing cover.
+Providing new artwork updates the shared title cover.

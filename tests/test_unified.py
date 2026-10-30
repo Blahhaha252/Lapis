@@ -69,3 +69,50 @@ def test_show_requires_episode_and_series_imdb():
                     "-v","input.mp4","-vl","en"])
     with pytest.raises(ValueError,match="Series"):
         prepare(a)
+
+def test_cover_flag_is_exposed():
+    p=get_parser()
+    opts=p.parse_args(["--content-type","movie","--imdb","tt123",
+        "--rating","PG","--cover-art","poster.jpg","-v","vid.mkv","-vl","en"])
+    assert opts.cover_art=="poster.jpg"
+
+def test_optimized_png_with_resize_and_exif(tmp_path,monkeypatch):
+    from PIL import Image, ImageOps
+    from unified import prepare_cover
+    source=tmp_path/"poster.jpg"
+    Image.new("RGB",(2000,3000),"orange").save(source)
+    output=tmp_path/"new.png"
+    recorded={}
+    original=Image.Image.save
+    def capture(self,fp,*args,**kwargs):
+        recorded.update(kwargs)
+        return original(self,fp,*args,**kwargs)
+    monkeypatch.setattr(Image.Image,"save",capture)
+    temp=prepare_cover(source,output)
+    with Image.open(temp) as result:
+        assert result.size==(720,1080)
+        assert result.format=="PNG"
+    assert recorded["compress_level"]==9
+    assert recorded["optimize"] is True
+    temp.unlink()
+
+def test_short_cover_not_upscaled_and_alpha_preserved(tmp_path):
+    from PIL import Image
+    from unified import prepare_cover
+    source=tmp_path/"logo.png"
+    Image.new("RGBA",(400,600),(1,2,3,85)).save(source)
+    generated=prepare_cover(source,tmp_path/"stored.png")
+    with Image.open(generated) as result:
+        assert result.size==(400,600)
+        assert result.getpixel((0,0))[3]==85
+    generated.unlink()
+
+def test_cover_destinations_by_title(tmp_path):
+    from types import SimpleNamespace
+    from unified import cover_destination
+    a=SimpleNamespace(content_type="movie",imdb="tt123")
+    assert cover_destination(tmp_path,a,None)==tmp_path/"tt123"/"cover_art.png"
+    a.content_type="show"
+    assert cover_destination(tmp_path,a,"tt88")==tmp_path/"show_metadata"/"tt88-cover_art.png"
+    a.content_type="anime"
+    assert cover_destination(tmp_path,a,"tt88")==tmp_path/"anime_metadata"/"tt88-cover_art.png"

@@ -3,6 +3,7 @@ import argparse, collections, fcntl, json, os, re, shutil, subprocess, sys, temp
 from pathlib import Path
 from fractions import Fraction
 import langcodes, yaml
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 HEIGHTS=(2160,1440,1080,720,480,360,240,144)
 CRF={2160:23,1440:23,1080:25,720:25}
@@ -66,6 +67,7 @@ def get_parser():
     p.add_argument("--movie-name");p.add_argument("--show-name");p.add_argument("--episode-name")
     p.add_argument("--season",type=int);p.add_argument("--episode",type=int)
     p.add_argument("--rating",required=True);p.add_argument("--year",type=int)
+    p.add_argument("--cover-art",metavar="IMAGE",help="Title-wide cover: optimized PNG, maximum 1080px tall")
     group=p.add_mutually_exclusive_group()
     group.add_argument("--add",action="store_true")
     group.add_argument("--replace",action="store_true")
@@ -89,6 +91,15 @@ def prepare(a):
             raise ValueError("Use only the matching series IMDb flag")
         if not a.season or not a.episode or a.season<1 or a.episode<1:
             raise ValueError("Positive --season and --episode required")
+    if a.cover_art:
+        artwork=Path(a.cover_art).resolve()
+        if not artwork.is_file():raise ValueError("Cover image does not exist: "+str(artwork))
+        try:
+            with Image.open(artwork) as image:
+                image.verify()
+        except (OSError,ValueError,UnidentifiedImageError) as error:
+            raise ValueError("Invalid cover art image: "+str(artwork)) from error
+        a.cover_art=str(artwork)
     if not a.tracks:raise ValueError("At least one input is required")
     for t in a.tracks:
         t["language"]=lang(t["language"])
@@ -224,12 +235,40 @@ def manifest(root,tracks):
             lines+=["#EXT-X-STREAM-INF:"+",".join(attrs),r["playlist"]]
     (root/"master.m3u8").write_text("\n".join(lines)+"\n")
 
+def cover_destination(root,a,series):
+    """A single title cover, never an episode-specific cover."""
+    if series:
+        return root/(a.content_type+"_metadata")/(series+"-cover_art.png")
+    return root/a.imdb/"cover_art.png"
+
+def prepare_cover(source,destination):
+    """Convert to fully optimized PNG, preserving aspect ratio and transparency."""
+    destination.parent.mkdir(parents=True,exist_ok=True)
+    fd,temp=tempfile.mkstemp(prefix=".lapis-cover-",suffix=".png",dir=destination.parent)
+    os.close(fd)
+    try:
+        with Image.open(source) as opened:
+            image=ImageOps.exif_transpose(opened)
+            image.load()
+            if image.height>1080:
+                width=max(1,round(image.width*1080/image.height))
+                image=image.resize((width,1080),Image.Resampling.LANCZOS)
+            if image.mode not in ("RGB","RGBA","L","LA","P"):
+                image=image.convert("RGBA" if "A" in image.getbands() else "RGB")
+            image.save(temp,format="PNG",compress_level=9,optimize=True)
+        return Path(temp)
+    except Exception:
+        Path(temp).unlink(missing_ok=True)
+        raise
+
 def catalogs(root,a,series):
     base=root/a.imdb
     entry={"type":a.content_type,"imdb":a.imdb,
            "name":a.movie_name if not series else a.episode_name,
            "rating":a.rating.upper(),"master":"hls/master.m3u8","download":"master.mkv"}
     if a.year:entry["year"]=a.year
+    if not series and cover_destination(root,a,series).is_file():
+        entry["cover_art"]="cover_art.png"
     if series:entry.update(series_imdb=series,season=a.season,episode=a.episode)
     metadata=base/("episode.json" if series else "movie.json")
     write_json(metadata,entry)
@@ -239,6 +278,8 @@ def catalogs(root,a,series):
                               "name":a.show_name,"seasons":{}})
         if data["type"]!=a.content_type:raise ValueError("Series type collision")
         if a.show_name:data["name"]=a.show_name
+        if cover_destination(root,a,series).is_file():
+            data["cover_art"]=series+"-cover_art.png"
         entries=data.setdefault("seasons",{}).setdefault(str(a.season),{"episodes":{}})["episodes"]
         for number,other in entries.items():
             if number!=str(a.episode) and other.get("imdb")==a.imdb:
@@ -259,8 +300,11 @@ def catalogs(root,a,series):
         raise ValueError("Legacy global.json incompatible with v2")
     g["version"]=2
     g["contents"]=[e for e in g["contents"] if e.get("imdb")!=content_id]
-    g["contents"].append({"imdb":content_id,"type":a.content_type,
-        "rating":rating,"metadata":path.relative_to(root).as_posix()})
+    registry_entry={"imdb":content_id,"type":a.content_type,
+        "rating":rating,"metadata":path.relative_to(root).as_posix()}
+    cover=cover_destination(root,a,series)
+    if cover.is_file():registry_entry["cover_art"]=cover.relative_to(root).as_posix()
+    g["contents"].append(registry_entry)
     write_json(globalpath,g)
 def move_tree(source,dest):
     # Merge individual track directories without deleting sibling tracks.
@@ -295,6 +339,7 @@ def publish(a):
         stage=Path(tempfile.mkdtemp(prefix=".lapis-stage-",dir=base))
         video_duration=max([float(t.get("duration") or 0) for t in a.tracks if t["kind"]=="video"]+[float(t.get("duration") or 0) for t in old if t["kind"]=="video"]+[1])
         try:
+            staged_cover=prepare_cover(a.cover_art,stage/"cover_art.png") if a.cover_art else None
             for t in a.tracks:
                 if t["kind"]=="video":t["renditions"]=renditions(t,stage)
                 elif t["kind"]=="audio":t["playlist"]=audio(t,stage)
@@ -303,6 +348,10 @@ def publish(a):
             remux(base/"master.mkv",retained,a.tracks,tracks)
             # Publish staged media paths only after all encodes and download succeed.
             hls.mkdir(exist_ok=True)
+            if staged_cover:
+                destination=cover_destination(root,a,series)
+                destination.parent.mkdir(parents=True,exist_ok=True)
+                os.replace(staged_cover,destination)
             move_tree(stage,hls)
             # Avoid leaving deleted tracks on the CDN when replacement was requested.
             oldids={t["id"] for t in retained}
@@ -321,5 +370,5 @@ def publish(a):
         finally:shutil.rmtree(stage,ignore_errors=True)
 def cli(argv=None):
     try:publish(get_parser().parse_args(argv));return 0
-    except (ValueError,KeyError,OSError,subprocess.CalledProcessError) as e:
+    except (ValueError,KeyError,OSError,UnidentifiedImageError,subprocess.CalledProcessError) as e:
         print("Lapis error:",e,file=sys.stderr);return 1
