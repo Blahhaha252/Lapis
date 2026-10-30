@@ -76,3 +76,21 @@ def test_series_catalog_per_episode_highest_rating(tmp_path,media):
     assert (root/"tt102"/"hls"/"master.m3u8").is_file()
     global_data=json.loads((root/"global.json").read_text())
     assert global_data["contents"][0]["rating"]=="TV-MA"
+
+def test_multiple_video_languages_one_master(tmp_path,media):
+    original,_,_,_=media
+    second=tmp_path/"blue.mkv"
+    ffmpeg("-f","lavfi","-i","color=c=blue:s=320x240:r=25:d=1",
+           "-c:v","libx264","-pix_fmt","yuv420p","-an",second)
+    root=tmp_path/"cdn"
+    assert cli(["--content-type","movie","--imdb","tt987655",
+                "--movie-name","Two Videos","--rating","PG","--output",str(root),
+                "-v",str(original),"-vl","english",
+                "-v",str(second),"-vl","japanese"])==0
+    hls=root/"tt987655"/"hls"
+    tracks=json.loads((hls/"tracks.json").read_text())["tracks"]
+    assert len([t for t in tracks if t["kind"]=="video"])==2
+    assert len(probe(root/"tt987655"/"master.mkv"))==2
+    master=(hls/"master.m3u8").read_text()
+    assert master.count("TYPE=VIDEO")>=4
+    assert 'LANGUAGE="en"' in master and 'LANGUAGE="ja"' in master
