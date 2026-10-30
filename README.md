@@ -49,9 +49,10 @@ cannot mux a requested codec rather than silently applying lossy transcoding.
 Every HLS subtitle is WebVTT; bitmap inputs are rejected.
 
 **Player caution:** Standard HLS clients may not treat multiple language-labelled
-video variants as independent source selectors. The master carries a VIDEO-ID
-extension to assist custom players. This is not a standardized HLS video track
-switching mechanism; WBC needs custom source filtering for source-stable ABR.
+video variants as independent source selectors. The master advertises TYPE=VIDEO rendition groups by quality, plus separate
+AUDIO and SUBTITLES groups. Not all HLS players support switching TYPE=VIDEO
+renditions. WBC still needs verification and likely custom source-stable ABR
+selection.
 Publishing an update does not provide transaction rollback for a power loss.
 Always stage critical CDN updates and keep a backup.
 
