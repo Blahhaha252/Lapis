@@ -191,26 +191,39 @@ def remux(master,retained,new,alltracks):
     finally:
         if temp.exists():temp.unlink()
 def manifest(root,tracks):
-    lines=["#EXTM3U","#EXT-X-VERSION:7"]
-    audio_tracks=[t for t in tracks if t["kind"]=="audio"]
+    """Publish every audio/video/subtitle stream through one master."""
+    videos=[t for t in tracks if t["kind"]=="video"]
+    audios=[t for t in tracks if t["kind"]=="audio"]
     subtitles_tracks=[t for t in tracks if t["kind"]=="subtitle"]
-    for i,t in enumerate(audio_tracks):
+    lines=["#EXTM3U","#EXT-X-VERSION:7"]
+    for i,t in enumerate(audios):
         lines.append('#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="%s",LANGUAGE="%s",DEFAULT=%s,AUTOSELECT=YES,URI="%s"'%
                      (t["id"],t["language"],"YES" if i==0 else "NO",t["playlist"]))
     for t in subtitles_tracks:
         lines.append('#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subtitles",NAME="%s",LANGUAGE="%s",DEFAULT=NO,AUTOSELECT=YES,URI="%s"'%
                      (t["id"],t["language"],t["playlist"]))
-    for t in tracks:
-        if t["kind"]!="video":continue
+    # Group independently selectable video sources by quality, not as ABR substitutes.
+    grouped={}
+    for t in videos:
         for r in t["renditions"]:
-            # Keep source identity; the player must retain it during ABR selection.
+            grouped.setdefault(r["height"],[]).append((t,r))
+    for height,items in sorted(grouped.items(),reverse=True):
+        group_id="video-%dp"%height
+        for i,(t,r) in enumerate(items):
+            lines.append('#EXT-X-MEDIA:TYPE=VIDEO,GROUP-ID="%s",NAME="%s",LANGUAGE="%s",DEFAULT=%s,AUTOSELECT=YES,URI="%s"'%
+                         (group_id,t["id"],t["language"],"YES" if i==0 else "NO",r["playlist"]))
+    for t in videos:
+        for r in t["renditions"]:
+            h=r["height"]
             attrs=["BANDWIDTH="+str({2160:14000000,1440:8000000,1080:5000000,720:3000000,
-               480:1400000,360:900000,240:500000,144:300000}[r["height"]]),
-               "RESOLUTION=%dx%d"%(r["width"],r["height"]), 'VIDEO-ID="%s"'%t["id"]]
-            if audio_tracks:attrs.append('AUDIO="audio"')
+                      480:1400000,360:900000,240:500000,144:300000}[h]),
+                   "RESOLUTION=%dx%d"%(r["width"],h),
+                   'VIDEO="video-%dp"'%h]
+            if audios:attrs.append('AUDIO="audio"')
             if subtitles_tracks:attrs.append('SUBTITLES="subtitles"')
             lines+=["#EXT-X-STREAM-INF:"+",".join(attrs),r["playlist"]]
     (root/"master.m3u8").write_text("\n".join(lines)+"\n")
+
 def catalogs(root,a,series):
     base=root/a.imdb
     entry={"type":a.content_type,"imdb":a.imdb,
