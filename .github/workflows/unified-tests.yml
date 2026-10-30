@@ -13,5 +13,5 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -r requirements.txt pytest
-      - run: python -m compileall -q main.py unified.py tests/test_unified.py
-      - run: python -m pytest -q tests/test_unified.py
+      - run: python -m compileall -q main.py unified.py tests/test_unified.py tests/test_unified_integration.py
+      - run: python -m pytest -q tests/test_unified.py tests/test_unified_integration.py
