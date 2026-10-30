@@ -111,7 +111,7 @@ def named_tracks(old,new,replace):
     for t in new:
         if replace:
             retained=[x for x in retained if not(x["kind"]==t["kind"] and x["language"]==t["language"])]
-        used={x["id"] for x in retained+fresh}
+        used={x["id"] for x in old+fresh}
         base=folder(t["language"]);num=1
         while base+"-%02d"%num in used:num+=1
         t["id"]=base+"-%02d"%num
@@ -157,12 +157,12 @@ def audio(t,stage):
          "-hls_segment_filename",str(dest/("segment-%05d."+ext)),str(dest/"playlist.m3u8")]
     command(c)
     return (dest/"playlist.m3u8").relative_to(stage).as_posix()
-def subtitles(t,stage):
+def subtitles(t,stage,video_duration=None):
     dest=stage/"subtitles";dest.mkdir(parents=True,exist_ok=True)
     vtt=dest/(t["id"]+".vtt")
     command(["ffmpeg","-nostdin","-v","error","-y","-i",t["path"],
              "-map","0:0","-f","webvtt",str(vtt)])
-    duration=max(1,float(t["duration"] or 1));pl=dest/(t["id"]+".m3u8")
+    duration=max(1,float(video_duration or t["duration"] or 1));pl=dest/(t["id"]+".m3u8")
     pl.write_text("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:%d\n"
                   "#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n"
                   "#EXTINF:%.3f,\n%s\n#EXT-X-ENDLIST\n"%(int(duration+1),duration,vtt.name))
@@ -279,11 +279,12 @@ def publish(a):
             raise ValueError("At least one video track is required")
         base.mkdir(parents=True,exist_ok=True)
         stage=Path(tempfile.mkdtemp(prefix=".lapis-stage-",dir=base))
+        video_duration=max([float(t.get("duration") or 0) for t in a.tracks if t["kind"]=="video"]+[float(t.get("duration") or 0) for t in old if t["kind"]=="video"]+[1])
         try:
             for t in a.tracks:
                 if t["kind"]=="video":t["renditions"]=renditions(t,stage)
                 elif t["kind"]=="audio":t["playlist"]=audio(t,stage)
-                else:t["playlist"]=subtitles(t,stage)
+                else:t["playlist"]=subtitles(t,stage,video_duration)
             # Remux preserved original tracks and newly provided streams without transcoding.
             remux(base/"master.mkv",retained,a.tracks,tracks)
             # Publish staged media paths only after all encodes and download succeed.
