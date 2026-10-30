@@ -71,6 +71,7 @@ def get_parser():
     group.add_argument("--replace",action="store_true")
     p.add_argument("--output");p.add_argument("--config",default="config.yml")
     p.add_argument("--dry-run",action="store_true")
+    p.set_defaults(tracks=[])
     return p
 def prepare(a):
     if not ID.fullmatch(a.imdb):raise ValueError("Invalid IMDb ID")
