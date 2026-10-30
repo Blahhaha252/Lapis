@@ -1,7 +1,7 @@
 name: Lapis unified tests
 on:
   push:
-    branches: [unified-hls-gpt6]
+    branches: [main, unified-hls-gpt6]
   pull_request:
     branches: [main]
 jobs:

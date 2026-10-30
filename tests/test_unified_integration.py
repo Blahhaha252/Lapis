@@ -94,3 +94,30 @@ def test_multiple_video_languages_one_master(tmp_path,media):
     master=(hls/"master.m3u8").read_text()
     assert master.count("TYPE=VIDEO")>=4
     assert 'LANGUAGE="en"' in master and 'LANGUAGE="ja"' in master
+
+def test_cover_title_metadata_and_incremental_preservation(tmp_path,media):
+    from PIL import Image
+    video,_,_,_=media
+    root=tmp_path/"cdn"
+    poster=tmp_path/"art.jpg"
+    Image.new("RGB",(2000,3000),"orange").save(poster)
+    base=["--content-type","show","--show-imdb","tt930",
+          "--show-name","Example Show","--rating","TV-PG",
+          "--output",str(root)]
+    assert cli(base+["--imdb","tt931","--season","1","--episode","1",
+                    "--cover-art",str(poster),
+                    "-v",str(video),"-vl","en"])==0
+    art=root/"show_metadata"/"tt930-cover_art.png"
+    with Image.open(art) as image:
+        assert image.format=="PNG"
+        assert image.size==(720,1080)
+    assert not (root/"tt931"/"cover_art.png").exists()
+    parent=json.loads((root/"show_metadata"/"tt930.json").read_text())
+    assert parent["cover_art"]=="tt930-cover_art.png"
+    catalog=json.loads((root/"global.json").read_text())
+    assert catalog["contents"][0]["cover_art"]=="show_metadata/tt930-cover_art.png"
+    original=art.read_bytes()
+    assert cli(base+["--imdb","tt932","--season","1","--episode","2",
+                    "-v",str(video),"-vl","en"])==0
+    assert art.read_bytes()==original
+    assert json.loads((root/"show_metadata"/"tt930.json").read_text())["cover_art"]=="tt930-cover_art.png"
