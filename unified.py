@@ -130,6 +130,15 @@ def named_tracks(old,new,replace):
         t["prefix"]=base+"/"+t["kind"]+"/"+t["id"]
         fresh.append(t)
     return retained+fresh,retained
+# Allow near-standard sources (e.g. 1920x900) to retain their named tier.
+# Apply this tolerance independently to both the 16:9 reference width and height.
+RENDITION_TOLERANCE_PX = 200
+
+def eligible_rendition(width, height, target_height):
+    target_width = round(target_height * 16 / 9)
+    return (width >= target_width - RENDITION_TOLERANCE_PX and
+            height >= target_height - RENDITION_TOLERANCE_PX)
+
 def renditions(t,stage):
     width,height=t["width"],t["height"]
     if not width or not height:raise ValueError("Video dimensions unknown")
@@ -138,7 +147,7 @@ def renditions(t,stage):
     if fps<=0:fps=Fraction(25,1)
     result=[]
     for h in HEIGHTS:
-        if h>height:continue
+        if not eligible_rendition(width,height,h):continue
         w=max(2,round(width*h/height/2)*2)
         limited=min(fps,Fraction(25 if h<=240 else 30 if h<=1080 else 60))
         dest=stage/t["prefix"]/(str(h)+"p");dest.mkdir(parents=True,exist_ok=True)

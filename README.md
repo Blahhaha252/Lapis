@@ -40,7 +40,7 @@ Structure: `<imdb>/master.mkv`, `<imdb>/hls/master.m3u8`,
 `<imdb>/hls/subtitles/<track>.vtt` plus its playlist.
 
 Video renditions follow the existing 2160, 1440, 1080, 720, 480, 360, 240,
-144 ladder, never upscale and never include a duplicate original-quality encode.
+144 ladder. A tier is eligible when its standard 16:9 width and height are\nwithin 200 pixels of the input dimensions **independently**. This permits\nlimited upscaling for near-standard sources (for example, 1920x900 can receive\na 1080p encode), while keeping the original aspect ratio. A normal 1280x720\nsource still cannot receive 1080p. No extra original-quality encode is made.
 2160/1440 use CRF 23; 1080/720 use CRF 25; smaller sizes retain established
 bitrate/maxrate/bufsize settings. Audio is not quality-coupled with video.
 Lossless audio is encoded to FLAC for HLS, while the MKV copies original streams.

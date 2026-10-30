@@ -116,3 +116,21 @@ def test_cover_destinations_by_title(tmp_path):
     assert cover_destination(tmp_path,a,"tt88")==tmp_path/"show_metadata"/"tt88-cover_art.png"
     a.content_type="anime"
     assert cover_destination(tmp_path,a,"tt88")==tmp_path/"anime_metadata"/"tt88-cover_art.png"
+
+def test_200px_rendition_leniency_both_axes(tmp_path,monkeypatch):
+    from unified import eligible_rendition
+    assert eligible_rendition(1920,900,1080)
+    assert eligible_rendition(1720,880,1080)  # Both axes exactly 200px short.
+    assert not eligible_rendition(1719,880,1080)  # Width short by 201px.
+    assert not eligible_rendition(1720,879,1080)  # Height short by 201px.
+    assert not eligible_rendition(1280,720,1080)  # 720p stays 720p.
+    commands=[]
+    monkeypatch.setattr("unified.command",lambda cmd: commands.append(cmd))
+    item={"kind":"video","language":"en","id":"english-01",
+          "prefix":"english/video/english-01","path":"dummy.mkv",
+          "width":1920,"height":900,"fps":"24/1"}
+    results=renditions(item,tmp_path)
+    assert results[0]["height"]==1080
+    assert results[0]["width"]==2304  # Original 1920:900 aspect ratio retained.
+    assert commands[0][commands[0].index("-vf")+1]=="scale=2304:1080"
+
