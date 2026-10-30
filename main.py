@@ -1,1 +1,5 @@
-from unified import cli\nimport sys\n\nif __name__ == '__main__':\n    sys.exit(cli())\n
+from unified import cli
+import sys
+
+if __name__ == '__main__':
+    sys.exit(cli())
