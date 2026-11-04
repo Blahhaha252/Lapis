@@ -100,7 +100,8 @@ def prepare(a):
         except (OSError,ValueError,UnidentifiedImageError) as error:
             raise ValueError("Invalid cover art image: "+str(artwork)) from error
         a.cover_art=str(artwork)
-    if not a.tracks:raise ValueError("At least one input is required")
+    if not a.tracks and not (a.add and a.cover_art):
+        raise ValueError("At least one input is required (or --add --cover-art for an existing title)")
     for t in a.tracks:
         t["language"]=lang(t["language"])
         path=Path(t["path"]).resolve()
@@ -325,6 +326,49 @@ def move_tree(source,dest):
         else:
             target.parent.mkdir(parents=True,exist_ok=True)
             os.replace(child,target)
+def update_cover_only(root,a,series):
+    """Change only artwork and cover references for an existing title."""
+    base=root/a.imdb
+    episode_path=base/("episode.json" if series else "movie.json")
+    if not episode_path.is_file() or not (base/"hls"/"tracks.json").is_file():
+        raise ValueError("Image-only --add requires an existing Lapis title")
+    episode=read_json(episode_path,{})
+    if episode.get("imdb")!=a.imdb or episode.get("type")!=a.content_type:
+        raise ValueError("Existing title does not match requested IMDb/type")
+    if series:
+        if (episode.get("series_imdb")!=series or
+            episode.get("season")!=a.season or episode.get("episode")!=a.episode):
+            raise ValueError("Existing episode does not match requested series/season/episode")
+        metadata=root/(a.content_type+"_metadata")/(series+".json")
+        if not metadata.is_file():
+            raise ValueError("Existing series metadata missing")
+        title=read_json(metadata,{})
+        if title.get("imdb")!=series or title.get("type")!=a.content_type:
+            raise ValueError("Existing series metadata does not match")
+        content_id=series
+    else:
+        metadata=episode_path
+        title=episode
+        content_id=a.imdb
+    globalpath=root/"global.json"
+    registry=read_json(globalpath,{"version":2,"contents":[]})
+    entries=registry.get("contents")
+    if not isinstance(entries,list):
+        raise ValueError("Legacy global.json incompatible with v2")
+    matches=[entry for entry in entries if entry.get("imdb")==content_id]
+    if len(matches)!=1 or matches[0].get("type")!=a.content_type:
+        raise ValueError("Existing global catalog entry missing or inconsistent")
+    destination=cover_destination(root,a,series)
+    staged=prepare_cover(a.cover_art,destination)
+    try:
+        os.replace(staged,destination)
+    finally:
+        staged.unlink(missing_ok=True)
+    title["cover_art"]=series+"-cover_art.png" if series else "cover_art.png"
+    matches[0]["cover_art"]=destination.relative_to(root).as_posix()
+    write_json(metadata,title)
+    write_json(globalpath,registry)
+
 def publish(a):
     series=prepare(a)
     root=Path(a.output).resolve() if a.output else Path(yaml.safe_load(
@@ -335,6 +379,9 @@ def publish(a):
     root.mkdir(parents=True,exist_ok=True)
     with (root/".lapis.lock").open("a+") as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
+        if not a.tracks:
+            update_cover_only(root,a,series)
+            return
         base=root/a.imdb;hls=base/"hls"
         old=read_json(hls/"tracks.json",{"tracks":[]})["tracks"]
         if old and not(a.add or a.replace):
