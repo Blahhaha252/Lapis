@@ -3,7 +3,7 @@ import shutil
 import subprocess
 from pathlib import Path
 import pytest
-from unified import cli
+from unified import cli, manifest
 
 def ffmpeg(*args):
     subprocess.run(["ffmpeg","-hide_banner","-loglevel","error","-nostdin","-y",*map(str,args)],check=True)
@@ -42,6 +42,7 @@ def test_real_single_master_and_incremental_tracks(tmp_path,media):
     assert (hls/"master.m3u8").is_file()
     tracks=json.loads((hls/"tracks.json").read_text())["tracks"]
     assert len(tracks)==3
+    assert 'CHANNELS="1"' in (hls/"master.m3u8").read_text()
     renditions=next(t["renditions"] for t in tracks if t["kind"]=="video")
     assert [r["height"] for r in renditions]==[240,144]
     first_ts=next((hls/Path(renditions[0]["playlist"]).parent).glob("*.ts"))
@@ -142,3 +143,32 @@ def test_cover_title_metadata_and_incremental_preservation(tmp_path,media):
                     "-v",str(video),"-vl","en"])==0
     assert art.read_bytes()==original
     assert json.loads((root/"show_metadata"/"tt930.json").read_text())["cover_art"]=="tt930-cover_art.png"
+
+def test_manifest_audio_channels_mixed_layouts(tmp_path):
+    # No media encoding needed to verify the HLS alternate-audio attributes.
+    tracks=[
+        {"kind":"video","id":"english-01","language":"en",
+         "renditions":[{"height":720,"width":1280,"playlist":"video/720p/playlist.m3u8"}]},
+        {"kind":"audio","id":"english-02","language":"en","channels":6,
+         "playlist":"english/audio/english-02/playlist.m3u8"},
+        {"kind":"audio","id":"japanese-01","language":"ja","channels":2,
+         "playlist":"japanese/audio/japanese-01/playlist.m3u8"}
+    ]
+    manifest(tmp_path,tracks)
+    master=(tmp_path/"master.m3u8").read_text()
+    audio_lines=[line for line in master.splitlines() if line.startswith("#EXT-X-MEDIA:TYPE=AUDIO")]
+    assert len(audio_lines)==2
+    assert 'NAME="english-02"' in audio_lines[0] and 'CHANNELS="6"' in audio_lines[0]
+    assert 'NAME="japanese-01"' in audio_lines[1] and 'CHANNELS="2"' in audio_lines[1]
+    assert 'DEFAULT=YES' in audio_lines[0] and 'DEFAULT=NO' in audio_lines[1]
+
+
+def test_manifest_audio_channels_unknown_omitted(tmp_path):
+    tracks=[
+        {"kind":"audio","id":"english-01","language":"en","channels":None,
+         "playlist":"audio/playlist.m3u8"}
+    ]
+    manifest(tmp_path,tracks)
+    master=(tmp_path/"master.m3u8").read_text()
+    assert 'TYPE=AUDIO' in master
+    assert 'CHANNELS=' not in master
