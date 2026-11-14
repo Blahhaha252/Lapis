@@ -221,8 +221,15 @@ def manifest(root,tracks):
     subtitles_tracks=[t for t in tracks if t["kind"]=="subtitle"]
     lines=["#EXTM3U","#EXT-X-VERSION:7"]
     for i,t in enumerate(audios):
-        lines.append('#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="%s",LANGUAGE="%s",DEFAULT=%s,AUTOSELECT=YES,URI="%s"'%
-                     (t["id"],t["language"],"YES" if i==0 else "NO",t["playlist"]))
+        # HLS requires CHANNELS when renditions in a group have different
+        # channel counts. Advertise it whenever the source count is known.
+        attrs=['TYPE=AUDIO','GROUP-ID="audio"',
+               'NAME="%s"'%t["id"],'LANGUAGE="%s"'%t["language"],
+               'DEFAULT=%s'%("YES" if i==0 else "NO"),'AUTOSELECT=YES']
+        if t.get("channels") is not None:
+            attrs.append('CHANNELS="%d"'%int(t["channels"]))
+        attrs.append('URI="%s"'%t["playlist"])
+        lines.append("#EXT-X-MEDIA:"+",".join(attrs))
     for t in subtitles_tracks:
         lines.append('#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subtitles",NAME="%s",LANGUAGE="%s",DEFAULT=NO,AUTOSELECT=YES,URI="%s"'%
                      (t["id"],t["language"],t["playlist"]))
