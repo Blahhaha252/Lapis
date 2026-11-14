@@ -170,16 +170,15 @@ def renditions(t,stage):
     if not result:raise ValueError("Input video is smaller than 144p")
     return result
 def audio(t,stage):
-    # HLS playback always uses AAC in MPEG-TS. Original streams remain
-    # untouched in master.mkv, which remux() builds using stream copy.
+    # Playback audio uses AAC in fragmented MP4 to avoid audio-only MPEG-TS
+    # playback dropouts. remux() independently preserves original tracks.
     dest=stage/t["prefix"];dest.mkdir(parents=True,exist_ok=True)
     bitrate="384k" if (t.get("channels") or 0)>2 else "256k"
     c=["ffmpeg","-nostdin","-v","error","-y","-i",t["path"],"-map","0:0",
        "-vn","-sn","-dn","-c:a","aac","-b:a",bitrate,
-       "-muxpreload","0","-muxdelay","0",
        "-f","hls","-hls_time","10","-hls_playlist_type","vod",
-       "-hls_segment_type","mpegts",
-       "-hls_segment_filename",str(dest/"segment-%05d.ts"),
+       "-hls_segment_type","fmp4","-hls_fmp4_init_filename","init.mp4",
+       "-hls_segment_filename",str(dest/"segment-%05d.m4s"),
        str(dest/"playlist.m3u8")]
     command(c)
     return (dest/"playlist.m3u8").relative_to(stage).as_posix()
