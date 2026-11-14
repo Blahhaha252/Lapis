@@ -46,12 +46,28 @@ def test_real_single_master_and_incremental_tracks(tmp_path,media):
     assert [r["height"] for r in renditions]==[240,144]
     first_ts=next((hls/Path(renditions[0]["playlist"]).parent).glob("*.ts"))
     assert [s["codec_type"] for s in probe(first_ts)]==["video"]
+    video_playlist=(hls/Path(renditions[0]["playlist"])).read_text()
+    assert "#EXTINF" in video_playlist
+    audio_track=next(t for t in tracks if t["kind"]=="audio")
+    audio_dir=hls/Path(audio_track["playlist"]).parent
+    audio_segments=list(audio_dir.glob("*.ts"))
+    assert audio_segments and not list(audio_dir.glob("*.m4s"))
+    assert all(s["codec_name"]=="aac" for s in probe(audio_segments[0]) if s["codec_type"]=="audio")
+    assert "#EXT-X-MAP" not in (audio_dir/"playlist.m3u8").read_text()
+    # Original FLAC is preserved in the downloadable Matroska master.
+    master_streams=probe(content/"master.mkv")
+    assert any(s["codec_name"]=="flac" for s in master_streams if s["codec_type"]=="audio")
     assert (hls/"subtitles"/next(t["id"] for t in tracks if t["kind"]=="subtitle")).with_suffix(".vtt").is_file()
     assert len(probe(content/"master.mkv"))==3
     assert cli(base+["--add","-a",str(aac),"-al","english"])==0
     tracks=json.loads((hls/"tracks.json").read_text())["tracks"]
     assert len([t for t in tracks if t["kind"]=="audio"])==2
     assert len(probe(content/"master.mkv"))==4
+    # AAC HLS renditions are generated even if the source is already AAC.
+    tracks_added=json.loads((hls/"tracks.json").read_text())["tracks"]
+    for track in (t for t in tracks_added if t["kind"]=="audio"):
+        segment=next((hls/Path(track["playlist"]).parent).glob("*.ts"))
+        assert any(s["codec_name"]=="aac" for s in probe(segment) if s["codec_type"]=="audio")
     assert cli(base+["--replace","-a",str(aac),"-al","english"])==0
     tracks=json.loads((hls/"tracks.json").read_text())["tracks"]
     assert len([t for t in tracks if t["kind"]=="audio"])==1
