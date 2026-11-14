@@ -160,7 +160,8 @@ def renditions(t,stage):
             b,m,buf=RATE[h];cmd+=["-b:v",str(b),"-maxrate",str(m),"-bufsize",str(buf)]
         gop=max(1,round(limited*10))
         cmd+=["-g",str(gop),"-keyint_min",str(gop),"-sc_threshold","0",
-              "-force_key_frames","expr:gte(t,n_forced*10)","-f","hls","-hls_time","10",
+              "-force_key_frames","expr:gte(t,n_forced*10)","-muxpreload","0","-muxdelay","0",
+              "-f","hls","-hls_time","10",
               "-hls_playlist_type","vod","-hls_flags","independent_segments",
               "-hls_segment_type","mpegts","-hls_segment_filename",str(dest/"segment-%05d.ts"),
               str(dest/"playlist.m3u8")]
@@ -169,14 +170,17 @@ def renditions(t,stage):
     if not result:raise ValueError("Input video is smaller than 144p")
     return result
 def audio(t,stage):
+    # HLS playback always uses AAC in MPEG-TS. Original streams remain
+    # untouched in master.mkv, which remux() builds using stream copy.
     dest=stage/t["prefix"];dest.mkdir(parents=True,exist_ok=True)
-    lossless=t["codec"] in LOSSLESS or t["codec"].startswith("pcm_")
-    c=["ffmpeg","-nostdin","-v","error","-y","-i",t["path"],"-map","0:0","-vn","-sn","-dn"]
-    if lossless:c+=["-c:a","flac","-strict","-2","-hls_segment_type","fmp4"]
-    else:c+=["-c:a","copy","-hls_segment_type","mpegts" if t["codec"] in ("aac","mp3","ac3") else "fmp4"]
-    ext="m4s" if lossless or t["codec"] not in ("aac","mp3","ac3") else "ts"
-    c+=["-f","hls","-hls_time","10","-hls_playlist_type","vod",
-         "-hls_segment_filename",str(dest/("segment-%05d."+ext)),str(dest/"playlist.m3u8")]
+    bitrate="384k" if (t.get("channels") or 0)>2 else "256k"
+    c=["ffmpeg","-nostdin","-v","error","-y","-i",t["path"],"-map","0:0",
+       "-vn","-sn","-dn","-c:a","aac","-b:a",bitrate,
+       "-muxpreload","0","-muxdelay","0",
+       "-f","hls","-hls_time","10","-hls_playlist_type","vod",
+       "-hls_segment_type","mpegts",
+       "-hls_segment_filename",str(dest/"segment-%05d.ts"),
+       str(dest/"playlist.m3u8")]
     command(c)
     return (dest/"playlist.m3u8").relative_to(stage).as_posix()
 def subtitles(t,stage,video_duration=None):
