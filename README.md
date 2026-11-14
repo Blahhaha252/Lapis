@@ -43,9 +43,7 @@ Video renditions follow the existing 2160, 1440, 1080, 720, 480, 360, 240,
 144 ladder. A tier is eligible when its standard 16:9 width and height are\nwithin 200 pixels of the input dimensions **independently**. This permits\nlimited upscaling for near-standard sources (for example, 1920x900 can receive\na 1080p encode), while keeping the original aspect ratio. A normal 1280x720\nsource still cannot receive 1080p. No extra original-quality encode is made.
 2160/1440 use CRF 23; 1080/720 use CRF 25; smaller sizes retain established
 bitrate/maxrate/bufsize settings. Audio is not quality-coupled with video.
-Lossless audio is encoded to FLAC for HLS, while the MKV copies original streams.
-Browser compatibility with FLAC fMP4 HLS varies; the command fails if FFmpeg
-cannot mux a requested codec rather than silently applying lossy transcoding.
+All HLS audio is encoded to AAC in MPEG-TS `.ts` segments (256 kbps for mono/stereo; 384 kbps for multichannel). HLS video remains libx264 in MPEG-TS `.ts` segments. Both HLS muxers use zero mux preload/delay; separate playlists retain independently selectable audio tracks. The downloadable `master.mkv` still stream-copies the original audio and video codecs without re-encoding. Changing the HLS codec does not by itself guarantee timestamp synchronization.
 Every HLS subtitle is WebVTT; bitmap inputs are rejected.
 
 **Player caution:** Standard HLS clients may not treat multiple language-labelled
