@@ -59,6 +59,32 @@ Requirements: Python 3.10+, ffmpeg, ffprobe, PyYAML, langcodes.
 python -m pip install -r requirements.txt
 ```
 
+## Repair missing encodes from an existing IMDb
+
+An existing title must contain `<imdb>/master.mkv` and `<imdb>/hls/tracks.json`.
+The master supplies the original streams, while `tracks.json` preserves the
+track IDs, languages and stream indexes. Check all media or choose individual
+categories:
+
+```sh
+python main.py --check --imdb tt7526136
+python main.py --check --imdb tt7526136 --video --audio --subtitles
+python main.py --check --imdb tt7526136 --video
+python main.py --check --imdb tt7526136 --dry-run
+```
+
+Uses the normal `config.yml` output location (or `--output /path/to/cdn`).
+Every eligible video tier is compared with the saved rendition list and its
+playlist/segment files. Audio HLS playlists, init segments and media segments,
+plus subtitle WebVTT files and playlists, are also checked. Only missing or
+incomplete outputs are re-encoded, with `master.mkv` as the input; original
+media tracks are never remuxed or deleted. Existing good renditions are
+preserved. Changes are encoded to staging before publishing. As with normal
+publication, a power loss during publication has no automatic rollback.
+
+If `tracks.json` or `master.mkv` is missing, repair stops instead of
+guessing stream identities. `--dry-run` prints pending work without encoding.
+
 ## Cover art (title-wide)
 
 Pass `--cover-art poster.jpg` with any movie, show, or anime publication,
