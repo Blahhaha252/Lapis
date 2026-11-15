@@ -39,9 +39,16 @@ Structure: `<imdb>/master.mkv`, `<imdb>/hls/master.m3u8`,
 `<imdb>/hls/<language>/audio/<track>/`, and
 `<imdb>/hls/subtitles/<track>.vtt` plus its playlist.
 
-Video renditions follow the existing 2160, 1440, 1080, 720, 480, 360, 240,
-144 ladder. A tier is eligible when **either** the input width or input height\nreaches its standard 16:9 target dimension minus 200 pixels. This permits\nnear-standard and non-16:9 sources (for example, 1920x900 can receive a\n1080p encode, and 3840x1608 can receive a 2160p encode), while keeping the\noriginal aspect ratio. A normal 1280x720 source still cannot receive 1080p.\nQualifying by only one dimension can result in substantial upscaling. No\nextra original-quality encode is made.
-2160/1440 use CRF 23; 1080/720 use CRF 25; smaller sizes retain established
+Video renditions follow the 2160, 1440, 1080, 720, 480, 360, 240,
+144 ladder. A tier is eligible when **either** the input width or height
+meets its standard 16:9 reference dimension minus 200 pixels. A rendition
+is encoded at the source resolution or scaled *down* to fit inside that
+tier's 16:9 bounding box; it is never upscaled. Original aspect ratio is
+preserved (apart from even-pixel rounding for YUV420). For example,
+3840x1608 qualifies for the 2160p tier and is encoded at 3840x1608,
+not 5158x2160. The tier label may therefore differ from its actual encoded
+height; HLS RESOLUTION and tracks.json report the actual dimensions.
+\n2160/1440 use CRF 23; 1080/720 use CRF 25; smaller sizes retain established
 bitrate/maxrate/bufsize settings. Audio is not quality-coupled with video.
 All HLS audio is encoded to AAC in fragmented MP4 `.m4s` segments with an `init.mp4` initialization segment (256 kbps for mono/stereo; 384 kbps for multichannel). The audio HLS muxer uses FFmpeg's default mux delay settings. HLS video remains libx264 in MPEG-TS `.ts` segments with the existing video muxer settings unchanged. Separate playlists retain independently selectable audio tracks. The HLS master advertises each audio rendition's known channel count using `CHANNELS` (for example, `CHANNELS="6"` for 5.1 and `CHANNELS="2"` for stereo), allowing players to identify differences between audio layouts. The downloadable `master.mkv` still stream-copies the original audio and video codecs without re-encoding. This audio-container change does not by itself guarantee A/V synchronization.
 Every HLS subtitle is WebVTT; bitmap inputs are rejected.
@@ -74,7 +81,7 @@ python main.py --check --imdb tt7526136 --dry-run
 ```
 
 Uses the normal `config.yml` output location (or `--output /path/to/cdn`).
-Every eligible video tier is compared with the saved rendition list and its
+Every eligible video tier is compared with the saved rendition list, its\nactual encoded dimensions, and its
 playlist/segment files. Audio HLS playlists, init segments and media segments,
 plus subtitle WebVTT files and playlists, are also checked. Only missing or
 incomplete outputs are re-encoded, with `master.mkv` as the input; original
