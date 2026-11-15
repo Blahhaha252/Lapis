@@ -149,6 +149,15 @@ def eligible_rendition(width, height, target_height):
 def source_map(t):
     return "0:"+str(t.get("source_stream",0))
 
+def rendition_dimensions(width,height,tier):
+    """Fit inside both the source size and standard 16:9 tier box; never upscale."""
+    target_width=round(tier*16/9)
+    factor=min(1,target_width/width,tier/height)
+    # yuv420p requires even dimensions; always round down to avoid upscaling.
+    out_width=max(2,int(width*factor)//2*2)
+    out_height=max(2,int(height*factor)//2*2)
+    return out_width,out_height
+
 def renditions(t,stage,only_heights=None):
     width,height=t["width"],t["height"]
     if not width or not height:raise ValueError("Video dimensions unknown")
@@ -159,12 +168,12 @@ def renditions(t,stage,only_heights=None):
     for h in HEIGHTS:
         if not eligible_rendition(width,height,h):continue
         if only_heights is not None and h not in only_heights:continue
-        w=max(2,round(width*h/height/2)*2)
+        w,out_h=rendition_dimensions(width,height,h)
         limited=min(fps,Fraction(25 if h<=240 else 30 if h<=1080 else 60))
         dest=stage/t["prefix"]/(str(h)+"p");dest.mkdir(parents=True,exist_ok=True)
         cmd=["ffmpeg","-nostdin","-v","error","-y","-i",t["path"],"-map",source_map(t),
             "-an","-sn","-dn","-c:v","libx264","-preset","medium","-pix_fmt","yuv420p",
-            "-vf",f"scale={w}:{h}","-r",str(limited)]
+            "-vf",f"scale={w}:{out_h}","-r",str(limited)]
         if h in CRF:cmd+=["-crf",str(CRF[h])]
         else:
             b,m,buf=RATE[h];cmd+=["-b:v",str(b),"-maxrate",str(m),"-bufsize",str(buf)]
@@ -176,7 +185,8 @@ def renditions(t,stage,only_heights=None):
               "-hls_segment_type","mpegts","-hls_segment_filename",str(dest/"segment-%05d.ts"),
               str(dest/"playlist.m3u8")]
         command(cmd)
-        result.append(dict(height=h,width=w,playlist=(dest/"playlist.m3u8").relative_to(stage).as_posix()))
+        result.append(dict(height=h,width=w,encoded_height=out_h,
+                           playlist=(dest/"playlist.m3u8").relative_to(stage).as_posix()))
     if not result:raise ValueError("Input video is smaller than 144p")
     return result
 def audio(t,stage):
@@ -258,7 +268,7 @@ def manifest(root,tracks):
             h=r["height"]
             attrs=["BANDWIDTH="+str({2160:14000000,1440:8000000,1080:5000000,720:3000000,
                       480:1400000,360:900000,240:500000,144:300000}[h]),
-                   "RESOLUTION=%dx%d"%(r["width"],h),
+                   "RESOLUTION=%dx%d"%(r["width"],r.get("encoded_height",h)),
                    'VIDEO="video-%dp"'%h]
             if audios:attrs.append('AUDIO="audio"')
             if subtitles_tracks:attrs.append('SUBTITLES="subtitles"')
@@ -456,8 +466,11 @@ def check_existing(a):
                     raise ValueError("Video dimensions missing: "+t["id"])
                 expected=[q for q in HEIGHTS if eligible_rendition(width,height,q)]
                 existing={r["height"]:r for r in t.get("renditions",[])}
-                missing=[q for q in expected if q not in existing or
-                         not playlist_complete(hls,existing[q].get("playlist"))]
+                missing=[q for q in expected if (
+                         q not in existing or
+                         (existing[q].get("width"),existing[q].get("encoded_height",q)) !=
+                         rendition_dimensions(width,height,q) or
+                         not playlist_complete(hls,existing[q].get("playlist")))]
                 if missing:
                     repairs.append((t,source,missing))
                     print("VIDEO",t["id"],"missing:",", ".join(str(q)+"p" for q in missing))
