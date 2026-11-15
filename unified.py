@@ -131,13 +131,13 @@ def named_tracks(old,new,replace):
         t["prefix"]=base+"/"+t["kind"]+"/"+t["id"]
         fresh.append(t)
     return retained+fresh,retained
-# Allow near-standard sources (e.g. 1920x900) to retain their named tier.
-# Apply this tolerance independently to both the 16:9 reference width and height.
+# Allow near-standard and non-16:9 sources to retain their named tier.
+# Either source dimension can qualify against its 16:9 reference, with tolerance.
 RENDITION_TOLERANCE_PX = 200
 
 def eligible_rendition(width, height, target_height):
     target_width = round(target_height * 16 / 9)
-    return (width >= target_width - RENDITION_TOLERANCE_PX and
+    return (width >= target_width - RENDITION_TOLERANCE_PX or
             height >= target_height - RENDITION_TOLERANCE_PX)
 
 def renditions(t,stage):
