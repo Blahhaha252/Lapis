@@ -61,21 +61,27 @@ def get_parser():
     for flag,kind in [("-v","video"),("-a","audio"),("-s","subtitle")]:
         p.add_argument(flag,action=Input,metavar="FILE")
     for flag in ("-vl","-al","-sl"):p.add_argument(flag,action=Label,metavar="LANG")
-    p.add_argument("--content-type",choices=("movie","show","anime"),required=True)
+    p.add_argument("--content-type",choices=("movie","show","anime"))
     p.add_argument("--imdb",required=True)
     p.add_argument("--show-imdb");p.add_argument("--anime-imdb")
     p.add_argument("--movie-name");p.add_argument("--show-name");p.add_argument("--episode-name")
     p.add_argument("--season",type=int);p.add_argument("--episode",type=int)
-    p.add_argument("--rating",required=True);p.add_argument("--year",type=int)
+    p.add_argument("--rating");p.add_argument("--year",type=int)
     p.add_argument("--cover-art",metavar="IMAGE",help="Title-wide cover: optimized PNG, maximum 1080px tall")
     group=p.add_mutually_exclusive_group()
     group.add_argument("--add",action="store_true")
     group.add_argument("--replace",action="store_true")
     p.add_argument("--output");p.add_argument("--config",default="config.yml")
     p.add_argument("--dry-run",action="store_true")
+    p.add_argument("--check",action="store_true",help="Repair missing HLS renditions from master.mkv")
+    p.add_argument("--video",action="store_true",help="With --check: video only")
+    p.add_argument("--audio",action="store_true",help="With --check: audio only")
+    p.add_argument("--subtitles",action="store_true",help="With --check: subtitles only")
     p.set_defaults(tracks=[])
     return p
 def prepare(a):
+    if not a.content_type or not a.rating:
+        raise ValueError("Publishing requires --content-type and --rating")
     if not ID.fullmatch(a.imdb):raise ValueError("Invalid IMDb ID")
     if a.rating.upper() not in RATINGS and a.rating.upper()!="NR":
         raise ValueError("Unsupported content rating")
@@ -140,7 +146,10 @@ def eligible_rendition(width, height, target_height):
     return (width >= target_width - RENDITION_TOLERANCE_PX or
             height >= target_height - RENDITION_TOLERANCE_PX)
 
-def renditions(t,stage):
+def source_map(t):
+    return "0:"+str(t.get("source_stream",0))
+
+def renditions(t,stage,only_heights=None):
     width,height=t["width"],t["height"]
     if not width or not height:raise ValueError("Video dimensions unknown")
     try:fps=Fraction(t["fps"])
@@ -149,10 +158,11 @@ def renditions(t,stage):
     result=[]
     for h in HEIGHTS:
         if not eligible_rendition(width,height,h):continue
+        if only_heights is not None and h not in only_heights:continue
         w=max(2,round(width*h/height/2)*2)
         limited=min(fps,Fraction(25 if h<=240 else 30 if h<=1080 else 60))
         dest=stage/t["prefix"]/(str(h)+"p");dest.mkdir(parents=True,exist_ok=True)
-        cmd=["ffmpeg","-nostdin","-v","error","-y","-i",t["path"],"-map","0:0",
+        cmd=["ffmpeg","-nostdin","-v","error","-y","-i",t["path"],"-map",source_map(t),
             "-an","-sn","-dn","-c:v","libx264","-preset","medium","-pix_fmt","yuv420p",
             "-vf",f"scale={w}:{h}","-r",str(limited)]
         if h in CRF:cmd+=["-crf",str(CRF[h])]
@@ -174,7 +184,7 @@ def audio(t,stage):
     # playback dropouts. remux() independently preserves original tracks.
     dest=stage/t["prefix"];dest.mkdir(parents=True,exist_ok=True)
     bitrate="384k" if (t.get("channels") or 0)>2 else "256k"
-    c=["ffmpeg","-nostdin","-v","error","-y","-i",t["path"],"-map","0:0",
+    c=["ffmpeg","-nostdin","-v","error","-y","-i",t["path"],"-map",source_map(t),
        "-vn","-sn","-dn","-c:a","aac","-b:a",bitrate,
        "-f","hls","-hls_time","10","-hls_playlist_type","vod",
        "-hls_segment_type","fmp4","-hls_fmp4_init_filename","init.mp4",
@@ -186,7 +196,7 @@ def subtitles(t,stage,video_duration=None):
     dest=stage/"subtitles";dest.mkdir(parents=True,exist_ok=True)
     vtt=dest/(t["id"]+".vtt")
     command(["ffmpeg","-nostdin","-v","error","-y","-i",t["path"],
-             "-map","0:0","-f","webvtt",str(vtt)])
+             "-map",source_map(t),"-f","webvtt",str(vtt)])
     duration=max(1,float(video_duration or t["duration"] or 1));pl=dest/(t["id"]+".m3u8")
     pl.write_text("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:%d\n"
                   "#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n"
@@ -381,8 +391,7 @@ def update_cover_only(root,a,series):
 
 def publish(a):
     series=prepare(a)
-    root=Path(a.output).resolve() if a.output else Path(yaml.safe_load(
-        Path(a.config).read_text(encoding="utf-8"))["output"]).resolve()
+    root=output_root(a)
     if a.dry_run:
         print(json.dumps({"root":str(root),"series":series,"inputs":a.tracks},indent=2))
         return
@@ -435,6 +444,13 @@ def publish(a):
             catalogs(root,a,series)
         finally:shutil.rmtree(stage,ignore_errors=True)
 def cli(argv=None):
-    try:publish(get_parser().parse_args(argv));return 0
+    try:
+        a=get_parser().parse_args(argv)
+        if a.check:check_existing(a)
+        else:
+            if a.video or a.audio or a.subtitles:
+                raise ValueError("--video/--audio/--subtitles require --check")
+            publish(a)
+        return 0
     except (ValueError,KeyError,OSError,UnidentifiedImageError,subprocess.CalledProcessError) as e:
         print("Lapis error:",e,file=sys.stderr);return 1
