@@ -389,6 +389,126 @@ def update_cover_only(root,a,series):
     write_json(metadata,title)
     write_json(globalpath,registry)
 
+def output_root(a):
+    return (Path(a.output).resolve() if a.output else
+            Path(yaml.safe_load(Path(a.config).read_text(encoding="utf-8"))["output"]).resolve())
+
+def playlist_complete(hls, relative):
+    """Check the finished playlist and all locally referenced media segments."""
+    if not isinstance(relative,str) or not relative.endswith(".m3u8"):
+        return False
+    base=hls.resolve()
+    p=(hls/relative).resolve()
+    if not p.is_relative_to(base) or not p.is_file() or not p.stat().st_size:
+        return False
+    try:
+        content=p.read_text(encoding="utf-8")
+        if not content.startswith("#EXTM3U") or "#EXT-X-ENDLIST" not in content:
+            return False
+        refs=[line.strip() for line in content.splitlines() if line.strip() and not line.startswith("#")]
+        refs+=re.findall(r'#EXT-X-MAP:URI="([^"]+)"',content)
+        if not refs:
+            return False
+        for name in refs:
+            if "://" in name or name.startswith("/") or "?" in name or "#" in name:
+                return False
+            media=(p.parent/name).resolve()
+            if not media.is_relative_to(base) or not media.is_file() or not media.stat().st_size:
+                return False
+        return True
+    except (OSError,UnicodeError):
+        return False
+
+def check_existing(a):
+    """Regenerate only missing HLS files using master.mkv and its track metadata."""
+    if not ID.fullmatch(a.imdb):
+        raise ValueError("Invalid IMDb ID")
+    if a.tracks or a.add or a.replace or a.cover_art or a.content_type or a.rating:
+        raise ValueError("--check takes --imdb, optional --output/--config, and track selectors")
+    wanted={kind for enabled,kind in ((a.video,"video"),(a.audio,"audio"),
+                                     (a.subtitles,"subtitle")) if enabled}
+    if not wanted:
+        wanted={"video","audio","subtitle"}
+    root=output_root(a);base=root/a.imdb;hls=base/"hls"
+    master=base/"master.mkv";index=hls/"tracks.json"
+    if not master.is_file():
+        raise ValueError("Missing master.mkv: "+str(master))
+    if not index.is_file():
+        raise ValueError("Missing tracks.json: cannot infer the original track IDs/languages")
+    with (root/".lapis.lock").open("a+") as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        data=read_json(index,{})
+        if data.get("version")!=2 or not isinstance(data.get("tracks"),list):
+            raise ValueError("Unsupported tracks.json format")
+        tracks=data["tracks"];streams=probe(master).get("streams",[])
+        repairs=[]
+        for t in tracks:
+            kind=t.get("kind")
+            if kind not in wanted:
+                continue
+            i=t.get("download_stream")
+            if not isinstance(i,int) or i<0 or i>=len(streams) or streams[i].get("codec_type")!=kind:
+                raise ValueError("Invalid master stream mapping for "+str(t.get("id")))
+            source=streams[i]
+            if kind=="video":
+                width,height=source.get("width"),source.get("height")
+                if not width or not height:
+                    raise ValueError("Video dimensions missing: "+t["id"])
+                expected=[q for q in HEIGHTS if eligible_rendition(width,height,q)]
+                existing={r["height"]:r for r in t.get("renditions",[])}
+                missing=[q for q in expected if q not in existing or
+                         not playlist_complete(hls,existing[q].get("playlist"))]
+                if missing:
+                    repairs.append((t,source,missing))
+                    print("VIDEO",t["id"],"missing:",", ".join(str(q)+"p" for q in missing))
+                else:
+                    print("VIDEO",t["id"],"OK")
+            elif kind=="audio":
+                if not playlist_complete(hls,t.get("playlist")):
+                    repairs.append((t,source,None));print("AUDIO",t["id"],"missing or incomplete")
+                else:
+                    print("AUDIO",t["id"],"OK")
+            else:
+                vtt=hls/"subtitles"/(t["id"]+".vtt")
+                valid=playlist_complete(hls,t.get("playlist"))
+                valid=valid and vtt.is_file() and vtt.stat().st_size>0 and vtt.read_bytes()[:6]==b"WEBVTT"
+                if not valid:
+                    repairs.append((t,source,None));print("SUBTITLE",t["id"],"missing or incomplete")
+                else:
+                    print("SUBTITLE",t["id"],"OK")
+        if not repairs:
+            print("No missing HLS outputs for",a.imdb)
+            return
+        if a.dry_run:
+            print("Dry run:",len(repairs),"track(s) need repair. Nothing changed.")
+            return
+        stage=Path(tempfile.mkdtemp(prefix=".lapis-check-",dir=base))
+        try:
+            for t,source,missing in repairs:
+                source_track=dict(t,path=str(master),source_stream=t["download_stream"])
+                if t["kind"]=="video":
+                    source_track["width"],source_track["height"]=source["width"],source["height"]
+                    source_track["fps"]=source.get("avg_frame_rate") or source.get("r_frame_rate") or "25/1"
+                    done=renditions(source_track,stage,set(missing))
+                    current={r["height"]:r for r in t.get("renditions",[])}
+                    current.update({r["height"]:r for r in done})
+                    t["renditions"]=[current[h] for h in HEIGHTS if h in current]
+                elif t["kind"]=="audio":
+                    source_track["channels"]=source.get("channels")
+                    t["playlist"]=audio(source_track,stage)
+                else:
+                    source_track["duration"]=source.get("duration") or t.get("duration")
+                    duration=max((float(x.get("duration") or 0) for x in tracks
+                                  if x.get("kind")=="video"),default=1)
+                    t["playlist"]=subtitles(source_track,stage,duration)
+            # Only publish after all requested regeneration succeeds.
+            move_tree(stage,hls)
+            manifest(hls,tracks)
+            write_json(index,data)
+            print("Repaired",len(repairs),"track(s) for",a.imdb,"without remuxing master.mkv")
+        finally:
+            shutil.rmtree(stage,ignore_errors=True)
+
 def publish(a):
     series=prepare(a)
     root=output_root(a)
